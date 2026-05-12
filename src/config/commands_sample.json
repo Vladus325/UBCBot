@@ -1,7 +1,7 @@
 {
-  "!discord": "{user}, заходи в Discord: https://discord.com/invite/C5J8VJCW4e",
-  "!steam": "{user}, мой Steam: https://steamcommunity.com/id/usausatei/",
-  "!донат": "{user}, хочешь поддержать стримера? Тебе сюда: https://www.donationalerts.com/r/vladus_325 ещё вариант: https://new.donatepay.ru/@1050476",
+  "!discord": "Your Discord server here",
+  "!steam": "Your Steam here",
+  "!донат": "Your donations link here",
   "!какзаказатьбс": "Найдите музыку здесь: https://beatsaver.com Пишите в чат: !bsr *тэг карты* (в ссылке после maps/) Например: !bsr 33f0d",
   "!бот": "{botAnswer}",
   "!d20": "{roll:20}",
