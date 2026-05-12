@@ -90,5 +90,4 @@ Overlay will be available at http://localhost:OVERLAY_PORT
 
 (suggested cost)
 
-Rewards automatically trigger OBS media playback and refund points on download errors.</content>
-<parameter name="filePath">c:\Users\Vladus\Documents\UBCBot\README.md
+Rewards automatically trigger OBS media playback and refund points on download errors.
