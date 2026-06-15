@@ -15,6 +15,7 @@ Twitch music bot with web overlay and AI personality.
 - **Music Queue System**: Automatic audio caching with cleanup (max 100 files or 500MB)
 - **Twitch Channel Points Integration**: Reward-based music requests with different tiers (levels 1-3 with varying duration and skip costs)
 - **OBS Integration**: Automatic scene switching and media playback for rewards
+- **Discord Integration**: Automatic notifications when stream goes live
 - **Web Overlay**: Real-time updates with smooth animations for current song display
 - **Browser-based Audio Playback**: Seamless music streaming
 - **Twitch Chat Integration**: Custom commands, compliments, dice rolls, and more
@@ -47,6 +48,10 @@ TWITCH_REFRESH_TOKEN=bot_refresh_token (can be same as MY)
 OBS_PASSWORD=your_obs_websocket_password
 OVERLAY_PORT=3000
 
+//Discord (опционально)
+DISCORD_TOKEN=your_discord_bot_token
+DISCORD_CHANNEL_ID=your_discord_channel_id
+
 //For SR managment
 SONG_REWARD_1_ID=reward_id_level_1
 SONG_REWARD_2_ID=reward_id_level_2
@@ -57,6 +62,19 @@ AI_BASE_URL=...
 AI_API_KEY=...
 AI_MODEL=...
 ```
+
+### Discord Setup
+
+1. Go to [Discord Developer Portal](https://discord.com/developers/applications)
+2. Create a new application
+3. Go to "Bot" section and create a new bot
+4. Copy the bot token and paste it as `DISCORD_TOKEN` in `.env`
+5. Give the bot permissions: `Send Messages`, `Embed Links`
+6. Add the bot to your Discord server
+7. In Discord, right-click on a channel and select "Copy Channel ID"
+8. Paste it as `DISCORD_CHANNEL_ID` in `.env`
+
+When your Twitch stream goes live, the bot will automatically send a notification to the configured Discord channel with stream details and a link to watch.
 
 ## Running
 

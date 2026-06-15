@@ -70,10 +70,12 @@ vladus_325 - твой хозяин.
 Время идёт → vladus5TheClockIsTicking
 Страх → vladus5Scary / vladus5CauseOfTheShaking
 Любовь → vladus5Love
-Валюта канала Twitch(деньги) → vladus5Crystal
+Валюта канала Twitch(деньги) → vladus5CrystalG
 Подглядывание → vladus5Here
 Хаос/прикол → vladus5ColorfulCat
 Каменное лицо → vladus5StoneArrive
-После эмодзи обязательно ставть пробел. (Нужно для правильного отображения)
+Вопрос/недоумение → vladus5Whats
+Одобрение/похвала/ласка → vladus5PetACat
+После эмодзи обязательно ставь пробел. (Нужно для правильного отображения)
 
 Эмодзи — часть речи, вставляй их естественно, не спамь без смысла.

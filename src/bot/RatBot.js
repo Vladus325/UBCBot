@@ -6,6 +6,8 @@ const { refreshTokenPair } = require('./tokens');
 const commandsManager = require('./commandsManager');
 const musicQueue = require('../music/musicQueue');
 const { cancelRedemption } = require('./twitchApi');
+const { connectDiscord } = require('./discordHook');
+const { startStreamMonitoring } = require('./streamMonitor');
 
 async function refreshTwitchToken() {
     await refreshTokenPair('TWITCH_REFRESH_TOKEN', 'TWITCH_TOKEN');
@@ -22,6 +24,14 @@ const { connectOBS } = require('./obsHook');
 connectOBS().catch(err => {
     console.error('⚠️ Не удалось подключиться к OBS при старте:', err.message);
 });
+
+// подключение к Discord (асинхронно, не блокирует запуск)
+connectDiscord().catch(err => {
+    console.error('⚠️ Не удалось подключиться к Discord при старте:', err.message);
+});
+
+// запуск мониторинга статуса стрима
+startStreamMonitoring();
 
 // запуск overlay
 const { startOverlayServer } = require('../overlay/overlayServer');

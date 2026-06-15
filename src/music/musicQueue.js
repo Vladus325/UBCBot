@@ -5,7 +5,7 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const EventEmitter = require('events');
-const { sendMediaPlayPause } = require('./aimpControl');
+const { sendMediaPlay, sendMediaPause } = require('./aimpControl');
 const { setSourceVisibility } = require('../bot/obsHook');
 
 ffmpeg.setFfmpegPath(ffmpegPath);
@@ -58,9 +58,9 @@ class MusicQueue extends EventEmitter {
             return;
         }
 
-        // Только возобновляем если AIMP был на паузе, не запускаем автоматически
+        // Только возобновляем, если мы сами приостановили AIMP для заказной музыки
         if (this.aimpPausedForOrder) {
-            const resumed = await sendMediaPlayPause();
+            const resumed = await sendMediaPlay();
             if (resumed) {
                 this.aimpPausedForOrder = false;
             }
@@ -72,7 +72,7 @@ class MusicQueue extends EventEmitter {
             return;
         }
 
-        const paused = await sendMediaPlayPause();
+        const paused = await sendMediaPause();
         if (paused) {
             this.aimpPausedForOrder = true;
         }

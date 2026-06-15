@@ -179,7 +179,7 @@ async function processText(text, tags, channel, args = []) {
 
                 if (tags.mod || tags.badges?.broadcaster) {
                     handleMode(V_REWARDS, arg);
-                    handleMode(SR_REWARDS, !arg);
+                    handleMode(SR_REWARDS, arg);
                     replacement = `${tags.username}, VR Режим: ${arg ? 'Выключен' : 'Включён'}`;
                 }
                 break; 
