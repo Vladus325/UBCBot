@@ -360,5 +360,9 @@ module.exports = {
     loadCommands,
     getCommands,
     hasCommand,
-    getCommandResponse
+    getCommandResponse,
+    processText,
+    processBotAnswerCommand,
+    processRollCommand,
+    getRandomCompliment
 };
