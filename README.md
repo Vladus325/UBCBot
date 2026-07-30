@@ -61,7 +61,24 @@ SONG_REWARD_3_ID=reward_id_level_3
 AI_BASE_URL=...
 AI_API_KEY=...
 AI_MODEL=...
+
+//Optional yt-dlp configuration
+YT_DLP_PATH=path/to/yt-dlp.exe
+YT_DLP_EXTRA_ARGS=--cookies-from-browser chrome --extractor-args "youtube:visitor_data=YOUR_VISITOR_DATA"
 ```
+
+### yt-dlp / YouTube cookies
+
+If YouTube returns a bot verification or 429 error, set `YT_DLP_EXTRA_ARGS` with cookies or visitor data:
+
+- `YT_DLP_PATH` can point to a custom `yt-dlp` binary
+- `YT_DLP_EXTRA_ARGS` is appended to all yt-dlp invocations
+- Example:
+  - `YT_DLP_EXTRA_ARGS=--cookies-from-browser chrome`
+  - `YT_DLP_EXTRA_ARGS=--cookies /path/to/youtube-cookies.txt`
+  - `YT_DLP_EXTRA_ARGS=--extractor-args "youtube:visitor_data=YOUR_VISITOR_DATA"`
+
+For more details, check the yt-dlp docs and the error message returned by the bot.
 
 ### Discord Setup
 
