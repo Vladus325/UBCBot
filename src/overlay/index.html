@@ -4,219 +4,336 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <style>
-* {
-    box-sizing: border-box;
-}
-
+* { box-sizing: border-box; }
 body {
     margin: 0;
-    padding: 10px 60% 0 0;
+    padding: 18px 20px 18px 18px;
     font-family: Arial, sans-serif;
-    color: white;
+    color: #f7f7ff;
     background: transparent;
 }
-
-.container {
-    width: 100%;
-    background: rgba(0,0,0,0.6);
-    backdrop-filter: blur(10px);
-    padding: 20px;
-    border-radius: 15px;
-
-    transform: translateY(50px);
+.panel {
+    width: min(460px, 100%);
+    background: rgba(8, 10, 18, 0.78);
+    backdrop-filter: blur(16px);
+    border: 1px solid rgba(255,255,255,0.14);
+    border-radius: 18px;
+    padding: 18px 18px 16px;
+    box-shadow: 0 10px 34px rgba(0,0,0,0.35);
+    transform: translateY(24px);
     opacity: 0;
-    transition: 0.5s ease;
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+    transition: 0.45s ease;
 }
-
-.container.show {
-    transform: translateY(0);
-    opacity: 1;
-}
-
-.title {
-    font-size: 16px;
-    font-weight: bold;
-    margin: 0;
-    word-wrap: break-word;
-    word-break: break-word;
-    overflow-wrap: break-word;
-    line-height: 1.4;
-    max-width: 95%;
-}
-
-.user {
-    font-size: 12px;
-    opacity: 0.8;
-    margin-top: 8px;
-}
-
-.progress {
-    width: 100%;
-    height: 6px;
-    background: rgba(0, 0, 0, 0.3);
-    margin-top: 12px;
-    border-radius: 3px;
-    overflow: hidden;
-}
-
-.bar {
-    height: 100%;
-    background: linear-gradient(90deg, rgba(82,12,115,1) 0%, rgba(50,0,102,1) 100%);
-    width: 0%;
-    transition: width 0.1s linear;
-}
-
-.bar.paused {
-    background: linear-gradient(90deg, rgba(128,128,128,1) 0%, rgba(96,96,96,1) 100%);
-}
+.panel.show { transform: translateY(0); opacity: 1; }
+.header { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.badge { display:inline-flex; align-items:center; gap:6px; padding: 5px 9px; border-radius:999px; font-size: 11px; font-weight:bold; text-transform:uppercase; letter-spacing:0.08em; background: rgba(255,255,255,0.12); }
+.title { font-size: 18px; font-weight: 700; margin: 10px 0 4px; line-height: 1.3; word-break: break-word; }
+.user { font-size: 13px; color: rgba(247,247,255,0.78); }
+.progress { width: 100%; height: 8px; background: rgba(255,255,255,0.14); margin-top: 12px; border-radius: 999px; overflow: hidden; }
+.bar { height: 100%; width: 0%; background: linear-gradient(90deg, #7c3aed 0%, #2563eb 100%); transition: width 0.1s linear; }
+.bar.paused { background: linear-gradient(90deg, #9ca3af 0%, #4b5563 100%); }
+.controls { display:flex; gap:8px; margin-top: 12px; flex-wrap: wrap; }
+button { border: none; border-radius: 999px; padding: 8px 12px; color:white; background: rgba(255,255,255,0.15); cursor:pointer; font-size: 12px; }
+button:hover { background: rgba(255,255,255,0.24); }
+button.primary { background: linear-gradient(90deg, #7c3aed, #2563eb); }
+.orderBox { margin-top: 12px; padding: 12px; border-radius: 14px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); }
+.orderRow { display:flex; gap:8px; flex-wrap:wrap; margin-top: 8px; }
+.orderInput { flex: 1; min-width: 140px; border: none; border-radius: 999px; padding: 9px 11px; background: rgba(255,255,255,0.12); color:white; }
+.orderInput::placeholder { color: rgba(247,247,255,0.6); }
+.queueBox { margin-top: 12px; padding: 10px 12px; border-radius: 14px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); }
+.queueTitle { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: rgba(247,247,255,0.72); }
+.queueList { display:grid; gap:6px; margin-top: 8px; }
+.queueItem { display:flex; justify-content: space-between; gap: 8px; padding: 8px 0; border-bottom: 1px solid rgba(255,255,255,0.08); font-size: 12px; color: rgba(247,247,255,0.78); }
+.queueItem:last-child { border-bottom: none; }
+.queueItem.current { color: #fff; }
+.queueItem strong { display:block; font-size: 13px; margin-bottom: 2px; }
+.queueItem .muted { font-size: 11px; color: rgba(247,247,255,0.58); }
+.meta { margin-top: 10px; font-size: 12px; color: rgba(247,247,255,0.72); display:grid; gap:4px; }
+.small { font-size: 11px; opacity: 0.9; }
 </style>
 </head>
 <body>
-
-<div class="container" id="container">
-    <div class="title" id="title">Нет трека</div>
-    <div class="user" id="user"></div>
-    <div class="progress">
-        <div class="bar" id="bar"></div>
+<div class="panel" id="panel">
+  <div class="header">
+    <div class="badge" id="modeBadge">Queue</div>
+    <div class="small" id="stateLabel">Ожидание</div>
+  </div>
+  <div class="title" id="title">Нет трека</div>
+  <div class="user" id="user"></div>
+  <div class="progress"><div class="bar" id="bar"></div></div>
+  <div class="controls">
+    <button id="playBtn">▶ Воспроизвести</button>
+    <button id="pauseBtn">⏸ Пауза</button>
+    <button id="skipBtn" class="primary">⏭ Пропустить</button>
+    <button id="sleepBtn">🌙 Sleep</button>
+  </div>
+  <div class="orderBox">
+    <div class="queueTitle">Заказать трек</div>
+    <div class="orderRow">
+      <input id="orderQuery" class="orderInput" placeholder="Ссылка или название" />
+      <input id="orderName" class="orderInput" placeholder="Ваше имя" value="vladus_325" />
+      <button id="orderBtn" class="primary">Заказать</button>
     </div>
+  </div>
+  <div class="queueBox">
+    <div class="queueTitle">Сейчас и дальше</div>
+    <div id="queueList" class="queueList"></div>
+  </div>
+  <div class="meta" id="meta"></div>
 </div>
-
 <audio id="player"></audio>
-
 <script>
 const player = document.getElementById('player');
-const container = document.getElementById('container');
-
+const panel = document.getElementById('panel');
+const titleEl = document.getElementById('title');
+const userEl = document.getElementById('user');
+const barEl = document.getElementById('bar');
+const modeBadgeEl = document.getElementById('modeBadge');
+const stateLabelEl = document.getElementById('stateLabel');
+const metaEl = document.getElementById('meta');
+const queueListEl = document.getElementById('queueList');
+const orderBtnEl = document.getElementById('orderBtn');
+const orderQueryEl = document.getElementById('orderQuery');
+const orderNameEl = document.getElementById('orderName');
 let lastTrackId = null;
 let last = null;
 let skipCalled = false;
 let interval = null;
 
-// Обработчик окончания трека
+function setStatus(text) {
+  stateLabelEl.innerText = text;
+}
+
+function escapeHtml(text = '') {
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function renderQueue(snapshot) {
+  if (!snapshot) {
+    queueListEl.innerHTML = '<div class="queueItem"><span>Очередь пуста</span></div>';
+    return;
+  }
+
+  const items = [];
+  if (snapshot.current) {
+    items.push({ ...snapshot.current, current: true });
+  }
+  snapshot.upcoming?.forEach((item) => items.push({ ...item, current: false }));
+
+  if (!items.length) {
+    queueListEl.innerHTML = '<div class="queueItem"><span>Очередь пуста</span></div>';
+    return;
+  }
+
+  queueListEl.innerHTML = items.map((item, index) => {
+    const title = escapeHtml(item.title || 'Без названия');
+    const requester = item.requestedBy ? `Запросил ${escapeHtml(item.requestedBy)}` : 'Без автора';
+    const source = item.sourceType ? `• ${escapeHtml(item.sourceType)}` : '';
+    const badge = item.current ? 'Сейчас' : `#${index + 1}`;
+    return `<div class="queueItem ${item.current ? 'current' : ''}"><div><strong>${title}</strong><div class="muted">${requester} ${source}</div></div><div class="muted">${badge}</div></div>`;
+  }).join('');
+}
+
+function updateMeta(data) {
+  const items = [];
+  if (data?.sleepModeEnabled) items.push(`Sleep: ${data.sleepPlaylistName}`);
+  if (data?.queueLength != null) items.push(`Очередь: ${data.queueLength}`);
+  if (data?.sourceType) items.push(`Источник: ${data.sourceType}`);
+  if (data?.isSleepTrack) items.push('Воспроизводится из спящего плейлиста');
+  metaEl.innerHTML = items.map((item) => `<div>${item}</div>`).join('');
+}
+
 player.addEventListener('ended', () => {
-    if (!skipCalled) {
-        skipCalled = true;
-        fetch('/api/skip', { method: 'POST' }).catch(err => console.error('Ошибка skip:', err));
-    }
+  if (!skipCalled) {
+    skipCalled = true;
+    fetch('/api/skip', { method: 'POST' }).catch(err => console.error('Ошибка skip:', err));
+  }
 });
 
-player.addEventListener('error', (e) => {
-    console.error('Ошибка аудио:', e);
-});
+async function refreshQueue() {
+  try {
+    const res = await fetch('/api/queue');
+    const data = await res.json();
+    renderQueue(data);
+  } catch (err) {
+    console.error('Ошибка очереди:', err);
+  }
+}
 
 async function update() {
-    try {
-        const res = await fetch('/api/now');
-        const data = await res.json();
+  try {
+    const res = await fetch('/api/now');
+    const data = await res.json();
+    if (!data) return;
 
-        if (!data) return;
+    last = data;
+    titleEl.innerText = data.title || 'Нет трека';
+    userEl.innerText = data.requestedBy ? `Запрошено: ${data.requestedBy}` : '';
+    updateMeta(data);
+    modeBadgeEl.innerText = data.isSleepTrack ? 'Sleep' : 'Queue';
+    setStatus(data.isPaused ? 'Пауза' : 'Играет');
 
-        document.getElementById('title').innerText = data.title;
-        document.getElementById('user').innerText = `Запрошено: ${data.requestedBy}`;
-
-        last = data;
-
-        const trackId = data.title + data.requestedBy;
-
-        if (trackId !== lastTrackId) {
-
-            player.pause(); // Останавливаем предыдущий трек
-            player.src = '/audio?' + Date.now(); // анти-кеш
-            player.volume = 1;
-            player.load(); // Перезагружаем аудио
-
-            player.play().catch(err => {
-                console.log('Autoplay blocked:', err);
-            });
-
-            container.classList.add('show');
-
-            lastTrackId = trackId;
-            skipCalled = false; // Reset flag for new track
-        }
-
-    } catch (e) {
-        console.error('Ошибка overlay:', e);
+    const trackId = `${data.title || ''}|${data.requestedBy || ''}|${data.currentSource || ''}`;
+    if (trackId !== lastTrackId) {
+      player.pause();
+      player.src = '/audio?' + Date.now();
+      player.volume = 1;
+      player.load();
+      player.play().catch(err => console.log('Autoplay blocked:', err));
+      panel.classList.add('show');
+      lastTrackId = trackId;
+      skipCalled = false;
     }
+
+    await refreshQueue();
+  } catch (e) {
+    console.error('Ошибка overlay:', e);
+  }
 }
 
 function animate() {
-    if (last && last.duration > 0) {
-        const percent = (last.elapsed / last.duration) * 100;
-        const bar = document.getElementById('bar');
-        bar.style.width = Math.min(percent, 100) + '%';
-        bar.classList.toggle('paused', last.isPaused);
-
-        // If track has ended based on progress, skip to next (but not if paused)
-        if (percent >= 100 && !skipCalled && !last.isPaused) {
-            skipCalled = true;
-            fetch('/api/skip', { method: 'POST' }).catch(err => console.error('Ошибка skip:', err));
-            clearInterval(interval);
-        }
+  if (last && last.duration > 0) {
+    const percent = (last.elapsed / last.duration) * 100;
+    barEl.style.width = Math.min(percent, 100) + '%';
+    barEl.classList.toggle('paused', last.isPaused);
+    if (percent >= 100 && !skipCalled && !last.isPaused) {
+      skipCalled = true;
+      fetch('/api/skip', { method: 'POST' }).catch(err => console.error('Ошибка skip:', err));
+      clearInterval(interval);
     }
-
-    requestAnimationFrame(animate);
+  }
+  requestAnimationFrame(animate);
 }
 
-// Подключаемся к SSE для real-time обновлений
 function setupSSE() {
-    try {
-        const eventSource = new EventSource('/api/events');
-
-        eventSource.onmessage = (e) => {
-            try {
-                const data = JSON.parse(e.data);
-                
-                if (data.type === 'skip') {
-                    document.getElementById('title').innerText = 'Нет трека';
-                    document.getElementById('user').innerText = '';
-                    document.getElementById('bar').style.width = '0%';
-                    container.classList.remove('show');
-                    player.pause();
-                    player.src = '';
-                    lastTrackId = null;
-                    last = null;
-                    skipCalled = false;
-
-                    clearInterval(interval);
-                } else if (data.type === 'pause') {
-                    player.pause();
-                } else if (data.type === 'play') {
-                    player.play().catch(err => console.log('Play blocked:', err));
-                } else if (data.type === 'trackStart') {
-                    update();
-                    interval = setInterval(update, 1000);
-                } else {
-                    // Обычное обновление состояния
-                    last = data;
-                    document.getElementById('title').innerText = data.title || 'Нет трека';
-                    if (data.requestedBy) {
-                        document.getElementById('user').innerText = `Запрошено: ${data.requestedBy}`;
-                    }
-                    if (data.isPaused) {
-                        player.pause();
-                    } else {
-                        player.play().catch(err => console.log('Play blocked:', err));
-                    }
-                }
-            } catch (err) {
-                console.error('SSE parse error:', err);
-            }
-        };
-
-        eventSource.onerror = (e) => {
-            console.log('SSE connection error:', e);
-        };
-
-    } catch (err) {
-        console.error('SSE setup error:', err);
-    }
+  try {
+    const eventSource = new EventSource('/api/events');
+    eventSource.onmessage = (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        refreshQueue().catch(err => console.error('Ошибка обновления очереди:', err));
+        if (data.type === 'skip') {
+          titleEl.innerText = 'Нет трека';
+          userEl.innerText = '';
+          barEl.style.width = '0%';
+          panel.classList.remove('show');
+          player.pause();
+          player.src = '';
+          lastTrackId = null;
+          last = null;
+          skipCalled = false;
+          clearInterval(interval);
+          setStatus('Ожидание');
+        } else if (data.type === 'pause') {
+          player.pause();
+          setStatus('Пауза');
+        } else if (data.type === 'play') {
+          player.play().catch(err => console.log('Play blocked:', err));
+          setStatus('Играет');
+        } else if (data.type === 'trackStart') {
+          update();
+          interval = setInterval(update, 1000);
+        } else {
+          last = data;
+          titleEl.innerText = data.title || 'Нет трека';
+          userEl.innerText = data.requestedBy ? `Запрошено: ${data.requestedBy}` : '';
+          updateMeta(data);
+          modeBadgeEl.innerText = data.isSleepTrack ? 'Sleep' : 'Queue';
+          setStatus(data.isPaused ? 'Пауза' : 'Играет');
+          if (data.isPaused) {
+            player.pause();
+          } else {
+            player.play().catch(err => console.log('Play blocked:', err));
+          }
+        }
+      } catch (err) {
+        console.error('SSE parse error:', err);
+      }
+    };
+    eventSource.onerror = () => {};
+  } catch (err) {
+    console.error('SSE setup error:', err);
+  }
 }
+
+async function control(action) {
+  try {
+    const res = await fetch(`/api/${action}`, { method: 'POST' });
+    const payload = await res.json();
+    if (!payload.success && payload.success !== undefined) {
+      console.warn('Control failed', payload);
+    }
+  } catch (err) {
+    console.error('Control error:', err);
+  }
+}
+
+async function orderTrack() {
+  const query = orderQueryEl.value.trim();
+  if (!query) {
+    setStatus('Введите ссылку или название');
+    return;
+  }
+
+  try {
+    const res = await fetch('/api/order', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        query,
+        username: orderNameEl.value.trim() || 'UI',
+        level: 1
+      })
+    });
+    const payload = await res.json();
+    if (payload.success) {
+      setStatus(`Заказ добавлен: ${payload.track?.title || query}`);
+      orderQueryEl.value = '';
+      orderNameEl.value = '';
+      await refreshQueue();
+    } else {
+      setStatus(payload.error || 'Не удалось добавить заказ');
+    }
+  } catch (err) {
+    console.error('Order error:', err);
+    setStatus('Не удалось добавить заказ');
+  }
+}
+
+document.getElementById('playBtn').addEventListener('click', () => control('play'));
+document.getElementById('pauseBtn').addEventListener('click', () => control('pause'));
+document.getElementById('skipBtn').addEventListener('click', () => control('skip'));
+orderBtnEl.addEventListener('click', orderTrack);
+orderQueryEl.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    orderTrack();
+  }
+});
+document.getElementById('sleepBtn').addEventListener('click', async () => {
+  const pathValue = window.prompt('Путь к локальному аудио/плейлисту (.xspf) или оставьте пусто для отключения', '');
+  if (pathValue === null) return;
+  const url = pathValue ? `/api/sleep?path=${encodeURIComponent(pathValue)}` : '/api/sleep?enabled=false';
+  try {
+    const res = await fetch(url, { method: 'POST' });
+    const payload = await res.json();
+    if (payload.success) {
+      setStatus(payload.enabled ? 'Sleep ON' : 'Sleep OFF');
+    }
+  } catch (err) {
+    console.error('Sleep control error:', err);
+  }
+});
 
 setupSSE();
 animate();
+refreshQueue();
+update();
 </script>
-
 </body>
 </html>

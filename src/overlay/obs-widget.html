@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    padding: 10px 60% 0 0;
+    font-family: Arial, sans-serif;
+    color: white;
+    background: transparent;
+}
+
+.container {
+    width: 100%;
+    background: rgba(0,0,0,0.6);
+    backdrop-filter: blur(10px);
+    padding: 20px;
+    border-radius: 15px;
+
+    transform: translateY(50px);
+    opacity: 0;
+    transition: 0.5s ease;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+}
+
+.container.show {
+    transform: translateY(0);
+    opacity: 1;
+}
+
+.title {
+    font-size: 16px;
+    font-weight: bold;
+    margin: 0;
+    word-wrap: break-word;
+    word-break: break-word;
+    overflow-wrap: break-word;
+    line-height: 1.4;
+    max-width: 95%;
+}
+
+.user {
+    font-size: 12px;
+    opacity: 0.8;
+    margin-top: 8px;
+}
+
+.progress {
+    width: 100%;
+    height: 6px;
+    background: rgba(0, 0, 0, 0.3);
+    margin-top: 12px;
+    border-radius: 3px;
+    overflow: hidden;
+}
+
+.bar {
+    height: 100%;
+    background: linear-gradient(90deg, rgba(82,12,115,1) 0%, rgba(50,0,102,1) 100%);
+    width: 0%;
+    transition: width 0.1s linear;
+}
+
+.bar.paused {
+    background: linear-gradient(90deg, rgba(128,128,128,1) 0%, rgba(96,96,96,1) 100%);
+}
+</style>
+</head>
+<body>
+
+<div class="container" id="container">
+    <div class="title" id="title">Нет трека</div>
+    <div class="user" id="user"></div>
+    <div class="progress">
+        <div class="bar" id="bar"></div>
+    </div>
+</div>
+
+<audio id="player"></audio>
+
+<script>
+const player = document.getElementById('player');
+const container = document.getElementById('container');
+
+let lastTrackId = null;
+let last = null;
+let skipCalled = false;
+let interval = null;
+
+// Обработчик окончания трека
+player.addEventListener('ended', () => {
+    if (!skipCalled) {
+        skipCalled = true;
+        fetch('/api/skip', { method: 'POST' }).catch(err => console.error('Ошибка skip:', err));
+    }
+});
+
+player.addEventListener('error', (e) => {
+    console.error('Ошибка аудио:', e);
+});
+
+async function update() {
+    try {
+        const res = await fetch('/api/now');
+        const data = await res.json();
+
+        if (!data) return;
+
+        document.getElementById('title').innerText = data.title;
+        document.getElementById('user').innerText = `Запрошено: ${data.requestedBy}`;
+
+        last = data;
+
+        const trackId = data.title + data.requestedBy;
+
+        if (trackId !== lastTrackId) {
+
+            player.pause(); // Останавливаем предыдущий трек
+            player.src = '/audio?' + Date.now(); // анти-кеш
+            player.volume = 1;
+            player.load(); // Перезагружаем аудио
+
+            player.play().catch(err => {
+                console.log('Autoplay blocked:', err);
+            });
+
+            container.classList.add('show');
+
+            lastTrackId = trackId;
+            skipCalled = false; // Reset flag for new track
+        }
+
+    } catch (e) {
+        console.error('Ошибка overlay:', e);
+    }
+}
+
+function animate() {
+    if (last && last.duration > 0) {
+        const percent = (last.elapsed / last.duration) * 100;
+        const bar = document.getElementById('bar');
+        bar.style.width = Math.min(percent, 100) + '%';
+        bar.classList.toggle('paused', last.isPaused);
+
+        // If track has ended based on progress, skip to next (but not if paused)
+        if (percent >= 100 && !skipCalled && !last.isPaused) {
+            skipCalled = true;
+            fetch('/api/skip', { method: 'POST' }).catch(err => console.error('Ошибка skip:', err));
+            clearInterval(interval);
+        }
+    }
+
+    requestAnimationFrame(animate);
+}
+
+// Подключаемся к SSE для real-time обновлений
+function setupSSE() {
+    try {
+        const eventSource = new EventSource('/api/events');
+
+        eventSource.onmessage = (e) => {
+            try {
+                const data = JSON.parse(e.data);
+                
+                if (data.type === 'skip') {
+                    document.getElementById('title').innerText = 'Нет трека';
+                    document.getElementById('user').innerText = '';
+                    document.getElementById('bar').style.width = '0%';
+                    container.classList.remove('show');
+                    player.pause();
+                    player.src = '';
+                    lastTrackId = null;
+                    last = null;
+                    skipCalled = false;
+
+                    clearInterval(interval);
+                } else if (data.type === 'pause') {
+                    player.pause();
+                } else if (data.type === 'play') {
+                    player.play().catch(err => console.log('Play blocked:', err));
+                } else if (data.type === 'trackStart') {
+                    update();
+                    interval = setInterval(update, 1000);
+                } else {
+                    // Обычное обновление состояния
+                    last = data;
+                    document.getElementById('title').innerText = data.title || 'Нет трека';
+                    if (data.requestedBy) {
+                        document.getElementById('user').innerText = `Запрошено: ${data.requestedBy}`;
+                    }
+                    if (data.isPaused) {
+                        player.pause();
+                    } else {
+                        player.play().catch(err => console.log('Play blocked:', err));
+                    }
+                }
+            } catch (err) {
+                console.error('SSE parse error:', err);
+            }
+        };
+
+        eventSource.onerror = (e) => {
+            console.log('SSE connection error:', e);
+        };
+
+    } catch (err) {
+        console.error('SSE setup error:', err);
+    }
+}
+
+setupSSE();
+animate();
+</script>
+
+</body>
+</html>

@@ -1,4 +1,5 @@
 const express = require('express');
+const path = require('path');
 const musicQueue = require('../music/musicQueue');
 const { refreshBrowserSource, waitForOBSConnection } = require('../bot/obsHook');
 
@@ -7,7 +8,16 @@ function startOverlayServer() {
     const PORT = process.env.OVERLAY_PORT || 3000;
 
     // папка с overlay (где index.html)
+    app.use(express.json());
     app.use(express.static(__dirname));
+
+    app.get('/obs', (req, res) => {
+        res.sendFile(path.join(__dirname, 'obs-widget.html'));
+    });
+
+    app.get('/widget', (req, res) => {
+        res.sendFile(path.join(__dirname, 'obs-widget.html'));
+    });
 
     // Список подписанных клиентов для SSE
     const clients = [];
@@ -38,9 +48,35 @@ function startOverlayServer() {
         broadcastUpdate({ type: 'play' });
     });
 
+    musicQueue.on('stateChanged', (state) => {
+        broadcastUpdate(state);
+    });
+
     // текущий трек
     app.get('/api/now', (req, res) => {
-        res.json(musicQueue.getState());
+        res.json(musicQueue.getPublicState());
+    });
+
+    app.get('/api/queue', (req, res) => {
+        res.json(musicQueue.getQueueSnapshot());
+    });
+
+    app.post('/api/order', async (req, res) => {
+        try {
+            const payload = req.body || {};
+            const query = String(payload.query || '').trim();
+            const username = String(payload.username || 'UI').trim() || 'UI';
+            const level = Number(payload.level) || 1;
+
+            if (!query) {
+                return res.status(400).json({ success: false, error: 'Введите ссылку или название трека' });
+            }
+
+            const track = await musicQueue.add(query, username, level, null, { allowLocal: true });
+            return res.json({ success: true, track });
+        } catch (err) {
+            return res.status(400).json({ success: false, error: err.message });
+        }
     });
 
     // Пропустить трек (для автоматического перехода)
@@ -59,6 +95,20 @@ function startOverlayServer() {
     app.post('/api/play', (req, res) => {
         const success = musicQueue.play();
         res.json({ success });
+    });
+
+    app.post('/api/sleep', async (req, res) => {
+        try {
+            const { path: playlistPath, enabled } = req.query;
+            if (playlistPath) {
+                const result = await musicQueue.setSleepPlaylist(playlistPath);
+                return res.json({ success: true, ...result });
+            }
+            const success = musicQueue.setSleepMode(enabled !== 'false');
+            return res.json({ success: true, enabled: success });
+        } catch (err) {
+            return res.status(400).json({ success: false, error: err.message });
+        }
     });
 
     // SSE endpoint для быстрых обновлений

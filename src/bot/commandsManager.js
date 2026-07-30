@@ -247,6 +247,27 @@ async function processText(text, tags, channel, args = []) {
                 break;
             }
 
+            case 'sleep': {
+                const modeArg = (args.join(' ').trim() || '').toLowerCase();
+                if (tags.mod || tags.badges?.broadcaster) {
+                    if (modeArg === 'off' || modeArg === 'false' || modeArg === 'disable') {
+                        musicQueue.setSleepMode(false);
+                        replacement = '🌙 Спящий плейлист отключён';
+                    } else if (modeArg) {
+                        try {
+                            const result = await musicQueue.setSleepPlaylist(modeArg);
+                            replacement = `🌙 Спящий плейлист включён (${result.name})`;
+                        } catch (err) {
+                            replacement = `⚠️ ${err.message}`;
+                        }
+                    } else {
+                        const state = musicQueue.getSleepState();
+                        replacement = state.enabled ? `🌙 Спящий плейлист активен (${state.playlistName})` : '🌙 Спящий плейлист отключён';
+                    }
+                }
+                break;
+            }
+
             case 'botAnswer': {
                 replacement = await processBotAnswerCommand(args, tags);
                 break;

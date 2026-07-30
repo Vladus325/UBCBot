@@ -4,6 +4,7 @@ const ffprobePath = require('ffprobe-static');
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const EventEmitter = require('events');
 const { setSourceVisibility } = require('../bot/obsHook');
 
@@ -65,10 +66,15 @@ function buildYtDlpSpawnSpec(extraArgs = []) {
     }
 
     if (process.platform === 'win32') {
-        candidates.push({ command: 'yt-dlp.exe', args: mergedArgs });
-        candidates.push({ command: 'yt-dlp.cmd', args: mergedArgs });
-        candidates.push({ command: 'py', args: ['-3', '-m', 'yt_dlp', ...mergedArgs] });
-        candidates.push({ command: 'py', args: ['-m', 'yt_dlp', ...mergedArgs] });
+        const winCommand = (command, ...args) => ({
+            command: process.env.ComSpec || 'cmd.exe',
+            args: ['/d', '/s', '/c', command, ...args]
+        });
+
+        candidates.push(winCommand('yt-dlp.exe', ...mergedArgs));
+        candidates.push(winCommand('yt-dlp.cmd', ...mergedArgs));
+        candidates.push(winCommand('py', '-3', '-m', 'yt_dlp', ...mergedArgs));
+        candidates.push(winCommand('py', '-m', 'yt_dlp', ...mergedArgs));
     } else {
         candidates.push({ command: 'yt-dlp', args: mergedArgs });
         candidates.push({ command: 'python3', args: ['-m', 'yt_dlp', ...mergedArgs] });
@@ -92,7 +98,7 @@ function spawnYtDlp(extraArgs = []) {
             const { command, args } = candidates[index];
             const child = spawn(command, args, {
                 stdio: ['ignore', 'pipe', 'pipe'],
-                shell: process.platform === 'win32' && !command.includes(path.sep)
+                shell: false
             });
 
             child.once('error', (err) => {
@@ -119,7 +125,6 @@ function probeFile(filePath) {
     });
 }
 
-// Создаем папку для кэша если не существует
 const CACHE_DIR = path.join(__dirname, 'audio_cache');
 if (!fs.existsSync(CACHE_DIR)) {
     fs.mkdirSync(CACHE_DIR, { recursive: true });
@@ -144,6 +149,11 @@ class MusicQueue extends EventEmitter {
         this.isPaused = false;
         this.pausedAt = 0;
         this.playbackGeneration = 0;
+        this.sleepModeEnabled = false;
+        this.sleepPlaylistPath = null;
+        this.sleepPlaylistEntries = [];
+        this.sleepPlaylistIndex = 0;
+        this.sleepPlaylistName = 'Не задан';
     }
 
     async showMusicTicker() {
@@ -154,48 +164,194 @@ class MusicQueue extends EventEmitter {
         await setSourceVisibility(OBS_MUSIC_TICKER_SOURCE, false);
     }
 
-    async add(query, username, level, redemptionData = null) {
-        query = cleanYouTubeUrl(query);
-        const orderId = redemptionData?.redemptionId || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-        console.log(`[music-order] received orderId=${orderId} user=${username} level=${level} query=${query}`);
+    sanitizePathInput(input) {
+        if (input === null || input === undefined) return '';
 
-        // проверка кэша
-        if (this.cache.has(query)) {
-            const cached = { ...this.cache.get(query), requestedBy: username, redemptionData };
-            this.queue.push(cached);
-            console.log(`[music-order] cache-hit orderId=${orderId} title=${cached.title}`);
-            this.hideMusicTicker().catch(err => console.error('OBS: не удалось скрыть бегущую строку:', err.message));
+        let value = String(input).trim();
+        if (!value) return '';
 
-            try {
-                if (!this.current) {
-                    this.playNext().catch(err => console.error('Ошибка запуска очереди:', err.message));
-                }
-            } catch (err) {
-                throw new Error(`Ошибка: ${err.message || err}`);
+        if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+            value = value.slice(1, -1).trim();
+        }
+
+        if (value.startsWith('/[') && value.endsWith(']()')) {
+            value = value.slice(2, -3).trim();
+        } else if (value.startsWith('[') && value.endsWith(']()')) {
+            value = value.slice(1, -3).trim();
+        } else if (value.startsWith('/[') && value.endsWith(']')) {
+            value = value.slice(2, -1).trim();
+        } else if (value.startsWith('[') && value.endsWith(']')) {
+            value = value.slice(1, -1).trim();
+        }
+
+        if (value.startsWith('/')) {
+            if (/^\/[a-zA-Z]:/.test(value)) {
+                value = value.slice(1);
             }
-            return cached;
         }
 
-        console.log(`[music-order] resolving info orderId=${orderId}`);
-        const info = await this.getInfo(query);
+        return value;
+    }
 
-        if (info.duration > MAX_DURATIONS[level]) {
-            throw new Error(`Трек слишком длинный (макс ${Math.floor(MAX_DURATIONS[level] / 60)} мин)`);
+    resolveLocalPath(input) {
+        const trimmed = this.sanitizePathInput(input);
+        if (!trimmed) return null;
+        if (trimmed.startsWith('file://')) {
+            return decodeURIComponent(trimmed.replace(/^file:\/\//i, ''));
+        }
+        if (trimmed.startsWith('~/')) {
+            return path.resolve(process.env.HOME || process.cwd(), trimmed.slice(2));
+        }
+        if (path.isAbsolute(trimmed)) {
+            return trimmed;
+        }
+        return path.resolve(trimmed);
+    }
+
+    isLikelyLocalPath(input) {
+        const trimmed = this.sanitizePathInput(input);
+        if (!trimmed) return false;
+        if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) return false;
+        if (trimmed.startsWith('file://')) return true;
+        if (trimmed.startsWith('~/')) return true;
+        if (trimmed.startsWith('/') || trimmed.startsWith('\\')) return true;
+        if (/^[a-zA-Z]:[\\/]/.test(trimmed)) return true;
+        if (trimmed.includes('/') || trimmed.includes('\\')) return true;
+        return false;
+    }
+
+    decodeXmlEntities(text = '') {
+        return text
+            .replace(/&quot;/g, '"')
+            .replace(/&#39;/g, "'")
+            .replace(/&amp;/g, '&')
+            .replace(/&lt;/g, '<')
+            .replace(/&gt;/g, '>');
+    }
+
+    parseXspfPlaylist(filePath) {
+        const resolvedPath = this.resolveLocalPath(filePath);
+        if (!resolvedPath || !fs.existsSync(resolvedPath)) {
+            throw new Error(`XSPF-плейлист не найден: ${filePath}`);
         }
 
-        console.log(`[music-order] resolved orderId=${orderId} title=${info.title} url=${info.webpage_url} duration=${info.duration || 0}`);
+        const content = fs.readFileSync(resolvedPath, 'utf8');
+        const matches = [...content.matchAll(/<location[^>]*>([\s\S]*?)<\/location>/gi)];
+        const baseDir = path.dirname(resolvedPath);
 
-        const track = {
-            title: info.title,
-            url: info.webpage_url,
-            duration: info.duration || 0,
+        return matches
+            .map((match) => {
+                const rawValue = (match[1] || '').replace(/<[^>]+>/g, '').trim();
+                if (!rawValue) return null;
+                const decodedValue = this.decodeXmlEntities(rawValue);
+                const trimmed = this.sanitizePathInput(decodedValue);
+
+                if (!trimmed) return null;
+                if (trimmed.startsWith('file://')) {
+                    return this.resolveLocalPath(trimmed);
+                }
+                if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+                    return trimmed;
+                }
+                if (trimmed.startsWith('/') || trimmed.startsWith('\\') || /^[a-zA-Z]:[\\/]/.test(trimmed)) {
+                    return this.resolveLocalPath(trimmed);
+                }
+                return path.resolve(baseDir, trimmed);
+            })
+            .filter(Boolean);
+    }
+
+    resolveTrackCandidates(query) {
+        const trimmed = (query || '').trim();
+        if (!trimmed) return [];
+
+        const isXspf = /\.xspf$/i.test(trimmed) && this.isLikelyLocalPath(trimmed);
+        if (isXspf) {
+            return this.parseXspfPlaylist(trimmed).map((entry) => {
+                const resolved = this.isLikelyLocalPath(entry) ? this.resolveLocalPath(entry) : entry;
+                return {
+                    sourceType: this.isLikelyLocalPath(entry) ? 'local' : 'remote',
+                    value: entry,
+                    filePath: this.isLikelyLocalPath(entry) ? resolved : undefined,
+                    cacheKey: entry
+                };
+            });
+        }
+
+        if (this.isLikelyLocalPath(trimmed)) {
+            const resolved = this.resolveLocalPath(trimmed);
+            return [{ sourceType: 'local', value: resolved, filePath: resolved, cacheKey: resolved }];
+        }
+
+        return [{ sourceType: 'remote', value: cleanYouTubeUrl(trimmed), cacheKey: trimmed }];
+    }
+
+    buildLocalTrack(filePath, username, level, redemptionData, originalQuery) {
+        const resolvedPath = this.resolveLocalPath(filePath);
+        return {
+            title: path.basename(resolvedPath),
+            url: originalQuery || resolvedPath,
+            duration: 0,
             requestedBy: username,
-            level: level,
-            redemptionData
+            level,
+            redemptionData,
+            sourceType: 'local',
+            filePath: resolvedPath
         };
+    }
 
-        this.cache.set(query, track);
-        this.queue.push(track);
+    async add(query, username, level, redemptionData = null, options = {}) {
+        const trimmed = (query || '').trim();
+        const allowLocal = Boolean(options.allowLocal);
+        const orderId = redemptionData?.redemptionId || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        console.log(`[music-order] received orderId=${orderId} user=${username} level=${level} query=${trimmed}`);
+
+        const candidates = this.resolveTrackCandidates(trimmed);
+        if (!candidates.length) {
+            throw new Error('Не удалось определить источник музыки');
+        }
+
+        const hasLocalCandidate = candidates.some(candidate => candidate.sourceType === 'local');
+        if (hasLocalCandidate && !allowLocal) {
+            throw new Error('Локальные пути разрешены только из user interface');
+        }
+        if (!candidates.length) {
+            throw new Error('Не удалось определить источник музыки');
+        }
+
+        const queuedTracks = [];
+
+        for (const candidate of candidates) {
+            const cacheKey = candidate.cacheKey || trimmed;
+            let track;
+
+            if (candidate.sourceType === 'local') {
+                track = this.buildLocalTrack(candidate.value, username, level, redemptionData, trimmed);
+            } else if (this.cache.has(cacheKey)) {
+                track = { ...this.cache.get(cacheKey), requestedBy: username, redemptionData, level };
+            } else {
+                const info = await this.getInfo(candidate.value);
+                if (info.duration > MAX_DURATIONS[level]) {
+                    throw new Error(`Трек слишком длинный (макс ${Math.floor(MAX_DURATIONS[level] / 60)} мин)`);
+                }
+
+                track = {
+                    title: info.title,
+                    url: info.webpage_url || candidate.value,
+                    duration: info.duration || 0,
+                    requestedBy: username,
+                    level,
+                    redemptionData,
+                    sourceType: 'remote'
+                };
+                this.cache.set(cacheKey, track);
+            }
+
+            this.queue.push(track);
+            queuedTracks.push(track);
+        }
+
+        this.emit('stateChanged', this.getPublicState());
         console.log(`[music-order] queued orderId=${orderId} queueLength=${this.queue.length}`);
         this.hideMusicTicker().catch(err => console.error('OBS: не удалось скрыть бегущую строку:', err.message));
 
@@ -207,14 +363,13 @@ class MusicQueue extends EventEmitter {
             throw new Error(`Ошибка: ${err.message || err}`);
         }
 
-        return track;
+        return queuedTracks[0];
     }
 
     getInfo(query) {
         return new Promise(async (resolve, reject) => {
             try {
-                // Check if query is a URL
-                const isUrl = query.startsWith('http://') || query.startsWith('https://');
+                const isUrl = /^https?:\/\//i.test(query);
                 const searchQuery = isUrl ? query : `ytsearch1:${query}`;
 
                 const yt = await spawnYtDlp([
@@ -263,7 +418,7 @@ class MusicQueue extends EventEmitter {
             }
             this.downloadProcess = null;
         }
-        
+
         if (this.ffmpegProcess) {
             try {
                 if (typeof this.ffmpegProcess.kill === 'function') {
@@ -275,31 +430,90 @@ class MusicQueue extends EventEmitter {
             this.ffmpegProcess = null;
         }
 
-        this.current = this.queue.shift() || null;
+        if (this.queue.length > 0) {
+            this.current = this.queue.shift() || null;
+        } else if (this.sleepModeEnabled && this.sleepPlaylistEntries.length > 0) {
+            this.current = this.buildSleepTrack();
+        } else {
+            this.current = null;
+        }
 
         if (!this.current) {
             console.log('[music-order] playNext finished: queue empty');
             await this.showMusicTicker();
+            this.emit('stateChanged', this.getPublicState());
             return;
         }
 
         await this.hideMusicTicker();
+        await this.startCurrentTrack(generation);
+    }
 
-        // Генерируем имя файла кэша
-        const cacheFile = path.join(CACHE_DIR, this.getCacheFileName(this.current.url));
-        console.log(`[music-order] starting track orderId=${this.current.redemptionData?.redemptionId || 'unknown'} title=${this.current.title} cacheFile=${cacheFile}`);
-        
-        // Проверяем, есть ли уже в кэше
+    buildSleepTrack() {
+        if (!this.sleepPlaylistEntries.length) {
+            return null;
+        }
+
+        const entry = this.sleepPlaylistEntries[this.sleepPlaylistIndex];
+        this.sleepPlaylistIndex = (this.sleepPlaylistIndex + 1) % this.sleepPlaylistEntries.length;
+
+        return {
+            title: entry.title,
+            url: entry.source,
+            duration: 0,
+            requestedBy: 'Спящий плейлист',
+            level: 0,
+            redemptionData: null,
+            sourceType: entry.sourceType,
+            filePath: entry.filePath || null,
+            isSleepTrack: true
+        };
+    }
+
+    async startCurrentTrack(generation) {
+        const currentTrack = this.current;
+        if (!currentTrack) return;
+
+        const sourcePath = currentTrack.filePath || currentTrack.url;
+        const logPrefix = currentTrack.isSleepTrack ? 'sleep-track' : 'track';
+        console.log(`[music-order] starting ${logPrefix} orderId=${currentTrack.redemptionData?.redemptionId || 'unknown'} title=${currentTrack.title} source=${sourcePath}`);
+
+        if (currentTrack.sourceType === 'local' && currentTrack.filePath) {
+            const resolvedPath = this.resolveLocalPath(currentTrack.filePath);
+            if (!fs.existsSync(resolvedPath)) {
+                console.error(`[music-order] local file not found: ${resolvedPath}`);
+                this.playNext().catch(err => console.error('Ошибка перехода к следующему треку:', err.message));
+                return;
+            }
+
+            try {
+                const metadata = await probeFile(resolvedPath);
+                const duration = metadata && metadata.format && metadata.format.duration ? Math.floor(metadata.format.duration) : 0;
+                if (duration <= 0) {
+                    console.warn(`[music-order] local file has zero duration: ${resolvedPath}`);
+                    this.playNext().catch(err => console.error('Ошибка перехода к следующему треку:', err.message));
+                    return;
+                }
+                currentTrack.duration = duration + 5;
+                this.streamFromCache(resolvedPath);
+            } catch (err) {
+                console.error('Error probing local track:', err.message);
+                this.playNext().catch(err => console.error('Ошибка перехода к следующему треку:', err.message));
+            }
+            return;
+        }
+
+        const cacheFile = path.join(CACHE_DIR, this.getCacheFileName(sourcePath));
         if (fs.existsSync(cacheFile)) {
             console.log(`[music-order] cache-hit file=${cacheFile}`);
-            const expectedUrl = this.current?.url;
+            const expectedUrl = currentTrack?.url;
             try {
                 const metadata = await probeFile(cacheFile);
                 const duration = metadata && metadata.format && metadata.format.duration ? Math.floor(metadata.format.duration) : 0;
 
                 if (duration === 0) {
                     console.warn(`[music-order] cache file has zero duration, redownloading: ${cacheFile}`);
-                    this.downloadAndCache(this.current.url, cacheFile, 0, generation);
+                    this.downloadAndCache(currentTrack.url, cacheFile, 0, generation);
                     return;
                 }
 
@@ -311,10 +525,10 @@ class MusicQueue extends EventEmitter {
                 this.streamFromCache(cacheFile);
             } catch (err) {
                 console.error('Error probing cached file:', err.message);
-                this.downloadAndCache(this.current.url, cacheFile, 0, generation);
+                this.downloadAndCache(currentTrack.url, cacheFile, 0, generation);
             }
         } else {
-            this.downloadAndCache(this.current.url, cacheFile, 0, generation);
+            this.downloadAndCache(currentTrack.url, cacheFile, 0, generation);
         }
     }
 
@@ -433,14 +647,14 @@ class MusicQueue extends EventEmitter {
         if (!fs.existsSync(cacheFile)) {
             console.error('Cache file not found:', cacheFile);
             this.playNext().catch(err => console.error('Ошибка перехода к следующему треку:', err.message));
-            throw new Error(`Что-то сломалось, это не ваша вина...`);
-            return;
+            throw new Error('Что-то сломалось, это не ваша вина...');
         }
 
         this.currentCacheFile = cacheFile;
         this.startedAt = Date.now();
         console.log(`[music-order] track start title=${this.current?.title} requestedBy=${this.current?.requestedBy} cacheFile=${cacheFile}`);
         this.emit('trackStart', this.current);
+        this.emit('stateChanged', this.getPublicState());
 
         if (!this.current.duration || this.current.duration <= 0) {
             console.error(`[music-order] invalid duration title=${this.current?.title}`);
@@ -453,13 +667,13 @@ class MusicQueue extends EventEmitter {
         if (this.cancelledProcessIds.size > 100) {
             this.cancelledProcessIds.clear();
         }
-
     }
 
     getCacheFileName(url) {
-        // Генерируем имя файла на основе URL
-        const hash = url.split('=')[1] || url.substring(url.length - 11);
-        return `${hash}.m4a`;
+        const name = path.basename(url || 'track') || 'track';
+        const safeName = name.replace(/[^a-zA-Z0-9._-]+/g, '_');
+        const hash = crypto.createHash('md5').update(String(url)).digest('hex').slice(0, 10);
+        return `${hash}_${safeName || 'track'}`;
     }
 
     skip() {
@@ -500,6 +714,7 @@ class MusicQueue extends EventEmitter {
         this.isPaused = true;
         this.pausedAt = Date.now() - this.startedAt;
         this.emit('pause');
+        this.emit('stateChanged', this.getPublicState());
         return true;
     }
 
@@ -508,6 +723,7 @@ class MusicQueue extends EventEmitter {
         this.isPaused = false;
         this.startedAt = Date.now() - this.pausedAt;
         this.emit('play');
+        this.emit('stateChanged', this.getPublicState());
         return true;
     }
 
@@ -523,12 +739,112 @@ class MusicQueue extends EventEmitter {
             requestedBy: this.current.requestedBy,
             duration: this.current.duration,
             elapsed: elapsed,
-            isPaused: this.isPaused
+            isPaused: this.isPaused,
+            sourceType: this.current.sourceType || 'remote',
+            isSleepTrack: Boolean(this.current.isSleepTrack)
+        };
+    }
+
+    getQueueSnapshot() {
+        return {
+            current: this.current ? {
+                title: this.current.title,
+                requestedBy: this.current.requestedBy,
+                duration: this.current.duration,
+                sourceType: this.current.sourceType || 'remote',
+                isPaused: this.isPaused,
+                isSleepTrack: Boolean(this.current.isSleepTrack)
+            } : null,
+            upcoming: this.queue.slice(0, 8).map(track => ({
+                title: track.title,
+                requestedBy: track.requestedBy,
+                sourceType: track.sourceType || 'remote',
+                isSleepTrack: Boolean(track.isSleepTrack)
+            })),
+            queueLength: this.queue.length
+        };
+    }
+
+    getPublicState() {
+        const baseState = this.getState();
+        return {
+            ...(baseState || {}),
+            sleepModeEnabled: this.sleepModeEnabled,
+            sleepPlaylistName: this.sleepPlaylistName,
+            queueLength: this.queue.length,
+            currentSource: this.current?.filePath || this.current?.url || null
+        };
+    }
+
+    async setSleepPlaylist(source) {
+        const trimmed = (source || '').trim();
+        if (!trimmed) {
+            this.sleepPlaylistPath = null;
+            this.sleepPlaylistEntries = [];
+            this.sleepPlaylistName = 'Не задан';
+            this.sleepModeEnabled = false;
+            this.emit('stateChanged', this.getPublicState());
+            return { enabled: false, name: this.sleepPlaylistName };
+        }
+
+        const resolvedPath = this.resolveLocalPath(trimmed);
+        if (!resolvedPath || !fs.existsSync(resolvedPath)) {
+            throw new Error('Плейлист не найден на диске');
+        }
+
+        if (/\.xspf$/i.test(resolvedPath)) {
+            const entries = this.parseXspfPlaylist(resolvedPath);
+            this.sleepPlaylistEntries = entries.map((entry) => {
+                const normalized = this.isLikelyLocalPath(entry) ? this.resolveLocalPath(entry) : entry;
+                return {
+                    title: path.basename(normalized),
+                    source: entry,
+                    sourceType: this.isLikelyLocalPath(entry) ? 'local' : 'remote',
+                    filePath: this.isLikelyLocalPath(entry) ? this.resolveLocalPath(entry) : null
+                };
+            });
+            this.sleepPlaylistPath = resolvedPath;
+            this.sleepPlaylistName = path.basename(resolvedPath);
+        } else {
+            this.sleepPlaylistEntries = [{
+                title: path.basename(resolvedPath),
+                source: resolvedPath,
+                sourceType: 'local',
+                filePath: resolvedPath
+            }];
+            this.sleepPlaylistPath = resolvedPath;
+            this.sleepPlaylistName = path.basename(resolvedPath);
+        }
+
+        this.sleepPlaylistIndex = 0;
+        this.sleepModeEnabled = true;
+        if (!this.current) {
+            this.playNext().catch(err => console.error('Ошибка запуска спящего плейлиста:', err.message));
+        }
+        this.emit('stateChanged', this.getPublicState());
+        return { enabled: true, name: this.sleepPlaylistName };
+    }
+
+    setSleepMode(enabled) {
+        this.sleepModeEnabled = Boolean(enabled);
+        if (this.sleepModeEnabled && !this.current && this.sleepPlaylistEntries.length > 0) {
+            this.playNext().catch(err => console.error('Ошибка запуска спящего плейлиста:', err.message));
+        }
+        this.emit('stateChanged', this.getPublicState());
+        return this.sleepModeEnabled;
+    }
+
+    getSleepState() {
+        return {
+            enabled: this.sleepModeEnabled,
+            playlistPath: this.sleepPlaylistPath,
+            playlistName: this.sleepPlaylistName,
+            entries: this.sleepPlaylistEntries.length,
+            queueLength: this.queue.length
         };
     }
 }
 
-// очищаем YouTube URL
 function cleanYouTubeUrl(url) {
     try {
         const parsed = new URL(url);
@@ -545,4 +861,12 @@ function cleanYouTubeUrl(url) {
     }
 }
 
-module.exports = new MusicQueue();
+const musicQueue = new MusicQueue();
+
+musicQueue.__testHooks = {
+    parseXspfPlaylist: (filePath) => musicQueue.parseXspfPlaylist(filePath),
+    resolveTrackCandidates: (query) => musicQueue.resolveTrackCandidates(query),
+    buildYtDlpSpawnSpec: (extraArgs = []) => buildYtDlpSpawnSpec(extraArgs)
+};
+
+module.exports = musicQueue;

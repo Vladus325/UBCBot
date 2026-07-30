@@ -100,6 +100,7 @@ npm start
 ```
 
 Overlay will be available at http://localhost:OVERLAY_PORT
+OBS widget will be available at http://localhost:OVERLAY_PORT/obs or http://localhost:OVERLAY_PORT/widget
 
 ## Commands
 

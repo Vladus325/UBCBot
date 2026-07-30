@@ -1,7 +1,25 @@
-const { Client, GatewayIntentBits, ChannelType } = require('discord.js');
+const { Client, GatewayIntentBits } = require('discord.js');
 
 let discordClient = null;
 let notificationChannel = null;
+
+const DISCORD_MAX_ATTEMPTS = Number(process.env.DISCORD_RETRY_ATTEMPTS || 5);
+const DISCORD_RETRY_DELAY_MS = Number(process.env.DISCORD_RETRY_DELAY_MS || 5000);
+
+function delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function buildDiscordClient() {
+    return new Client({
+        intents: [GatewayIntentBits.Guilds, GatewayIntentBits.DirectMessages],
+        rest: {
+            timeout: 30000,
+            retries: 2,
+            version: 10
+        }
+    });
+}
 
 async function connectDiscord() {
     if (!process.env.DISCORD_TOKEN || !process.env.DISCORD_CHANNEL_ID) {
@@ -9,44 +27,73 @@ async function connectDiscord() {
         return;
     }
 
-    try {
-        discordClient = new Client({ 
-            intents: [GatewayIntentBits.Guilds, GatewayIntentBits.DirectMessages] 
-        });
-
-        discordClient.on('ready', async () => {
-            console.log(`✅ Discord бот подключен как ${discordClient.user.tag}`);
-
-            // Получаем канал для отправки уведомлений (сначала из кэша, иначе делаем fetch)
-            let channel = discordClient.channels.cache.get(process.env.DISCORD_CHANNEL_ID);
-            if (!channel) {
+    for (let attempt = 1; attempt <= DISCORD_MAX_ATTEMPTS; attempt += 1) {
+        try {
+            if (discordClient) {
                 try {
-                    channel = await discordClient.channels.fetch(process.env.DISCORD_CHANNEL_ID);
-                } catch (fetchErr) {
-                    console.error('❌ Ошибка при fetch канала:', fetchErr.message);
+                    discordClient.destroy();
+                } catch (destroyErr) {
+                    console.warn('⚠️ Не удалось завершить прежний Discord-клиент:', destroyErr.message);
                 }
             }
 
-            if (channel && channel.isTextBased()) {
-                notificationChannel = channel;
-                console.log(`✅ Канал Discord настроен: #${channel.name}`);
-            } else {
-                console.error('❌ Не удалось найти Discord канал с ID:', process.env.DISCORD_CHANNEL_ID);
+            discordClient = buildDiscordClient();
+
+            discordClient.on('ready', async () => {
+                console.log(`✅ Discord бот подключен как ${discordClient.user.tag}`);
+
+                let channel = discordClient.channels.cache.get(process.env.DISCORD_CHANNEL_ID);
+                if (!channel) {
+                    try {
+                        channel = await discordClient.channels.fetch(process.env.DISCORD_CHANNEL_ID);
+                    } catch (fetchErr) {
+                        console.error('❌ Ошибка при fetch канала:', fetchErr.message);
+                    }
+                }
+
+                if (channel && channel.isTextBased()) {
+                    notificationChannel = channel;
+                    console.log(`✅ Канал Discord настроен: #${channel.name}`);
+                } else {
+                    console.error('❌ Не удалось найти Discord канал с ID:', process.env.DISCORD_CHANNEL_ID);
+                }
+            });
+
+            discordClient.on('error', err => {
+                console.error('❌ Ошибка Discord бота:', err);
+            });
+
+            discordClient.on('shardError', (err, shardId) => {
+                console.error(`⚠️ Shard ${shardId} error:`, err.message);
+            });
+
+            discordClient.on('warn', info => {
+                console.warn('⚠️ Discord warning:', info);
+            });
+
+            await discordClient.login(process.env.DISCORD_TOKEN);
+
+            if (!discordClient.readyAt) {
+                await new Promise(resolve => discordClient.once('ready', resolve));
             }
-        });
 
-        discordClient.on('error', err => {
-            console.error('❌ Ошибка Discord бота:', err);
-        });
+            return;
+        } catch (err) {
+            const isTimeout = /timeout|ECONNRESET|ETIMEDOUT|ENOTFOUND|ECONNREFUSED|socket hang up/i.test(err.message || '');
+            console.error(`❌ Попытка подключения к Discord ${attempt}/${DISCORD_MAX_ATTEMPTS} не удалась:`, err.message);
 
-        await discordClient.login(process.env.DISCORD_TOKEN);
+            if (attempt >= DISCORD_MAX_ATTEMPTS) {
+                console.error('❌ Discord подключение не удалось после всех попыток');
+                return;
+            }
 
-        // Убедимся, что клиент действительно готов перед возвратом
-        if (!discordClient.readyAt) {
-            await new Promise(resolve => discordClient.once('ready', resolve));
+            if (isTimeout) {
+                console.log(`⏳ Повторная попытка Discord через ${DISCORD_RETRY_DELAY_MS}мс...`);
+                await delay(DISCORD_RETRY_DELAY_MS);
+            } else {
+                await delay(Math.min(DISCORD_RETRY_DELAY_MS * 2, 15000));
+            }
         }
-    } catch (err) {
-        console.error('❌ Ошибка подключения к Discord:', err.message);
     }
 }
 
