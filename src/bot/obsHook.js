@@ -4,6 +4,12 @@ const obs = new OBSWebSocket();
 let isConnected = false;
 let reconnectInterval = null;
 
+function scheduleReconnect() {
+    if (!reconnectInterval) {
+        reconnectInterval = setInterval(attemptReconnect, 60000);
+    }
+}
+
 async function attemptReconnect() {
     if (isConnected) {
         if (reconnectInterval) {
@@ -24,31 +30,24 @@ async function attemptReconnect() {
         }
     } catch (err) {
         console.warn('⚠️ Попытка подключения к OBS не удалась, попробуем через минуту:', err.message);
+        scheduleReconnect();
     }
 }
 
 async function connectOBS() {
-    await attemptReconnect();
-
     obs.on('ConnectionClosed', () => {
         console.log('❌ Подключение к OBS закрыто');
         isConnected = false;
-        if (!reconnectInterval) {
-            reconnectInterval = setInterval(attemptReconnect, 60000); // каждую минуту
-        }
+        scheduleReconnect();
     });
 
     obs.on('ConnectionError', (err) => {
         console.error('❌ Ошибка подключения к OBS:', err.message);
         isConnected = false;
-        if (!reconnectInterval) {
-            reconnectInterval = setInterval(attemptReconnect, 60000); // каждую минуту
-        }
+        scheduleReconnect();
     });
 
-    if (!isConnected) {
-        reconnectInterval = setInterval(attemptReconnect, 60000); // каждую минуту
-    }
+    await attemptReconnect();
 }
 
 async function playRewardMedia(rewardName) {

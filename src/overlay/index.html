@@ -20,11 +20,7 @@ body {
     border-radius: 18px;
     padding: 18px 18px 16px;
     box-shadow: 0 10px 34px rgba(0,0,0,0.35);
-    transform: translateY(24px);
-    opacity: 0;
-    transition: 0.45s ease;
 }
-.panel.show { transform: translateY(0); opacity: 1; }
 .header { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
 .badge { display:inline-flex; align-items:center; gap:6px; padding: 5px 9px; border-radius:999px; font-size: 11px; font-weight:bold; text-transform:uppercase; letter-spacing:0.08em; background: rgba(255,255,255,0.12); }
 .title { font-size: 18px; font-weight: 700; margin: 10px 0 4px; line-height: 1.3; word-break: break-word; }
@@ -36,6 +32,7 @@ body {
 button { border: none; border-radius: 999px; padding: 8px 12px; color:white; background: rgba(255,255,255,0.15); cursor:pointer; font-size: 12px; }
 button:hover { background: rgba(255,255,255,0.24); }
 button.primary { background: linear-gradient(90deg, #7c3aed, #2563eb); }
+button.modeBtn { min-width: 106px; }
 .orderBox { margin-top: 12px; padding: 12px; border-radius: 14px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); }
 .orderRow { display:flex; gap:8px; flex-wrap:wrap; margin-top: 8px; }
 .orderInput { flex: 1; min-width: 140px; border: none; border-radius: 999px; padding: 9px 11px; background: rgba(255,255,255,0.12); color:white; }
@@ -62,9 +59,15 @@ button.primary { background: linear-gradient(90deg, #7c3aed, #2563eb); }
   <div class="user" id="user"></div>
   <div class="progress"><div class="bar" id="bar"></div></div>
   <div class="controls">
+    <button id="srModeBtn" class="modeBtn">SR: OFF</button>
+    <button id="vrModeBtn" class="modeBtn">VR: OFF</button>
+    <button id="wheelRewardBtn" class="modeBtn">Колесо: OFF</button>
+    <button id="wheelSpinBtn" class="primary">🎡 Крутить колесо</button>
     <button id="playBtn">▶ Воспроизвести</button>
     <button id="pauseBtn">⏸ Пауза</button>
     <button id="skipBtn" class="primary">⏭ Пропустить</button>
+    <button id="muteBtn">🔊 Звук</button>
+    <button id="clearQueueBtn">🧹 Очистить очередь</button>
     <button id="sleepBtn">🌙 Sleep</button>
   </div>
   <div class="orderBox">
@@ -84,7 +87,6 @@ button.primary { background: linear-gradient(90deg, #7c3aed, #2563eb); }
 <audio id="player"></audio>
 <script>
 const player = document.getElementById('player');
-const panel = document.getElementById('panel');
 const titleEl = document.getElementById('title');
 const userEl = document.getElementById('user');
 const barEl = document.getElementById('bar');
@@ -92,13 +94,22 @@ const modeBadgeEl = document.getElementById('modeBadge');
 const stateLabelEl = document.getElementById('stateLabel');
 const metaEl = document.getElementById('meta');
 const queueListEl = document.getElementById('queueList');
+const clearQueueBtnEl = document.getElementById('clearQueueBtn');
 const orderBtnEl = document.getElementById('orderBtn');
 const orderQueryEl = document.getElementById('orderQuery');
 const orderNameEl = document.getElementById('orderName');
-let lastTrackId = null;
+const srModeBtnEl = document.getElementById('srModeBtn');
+const vrModeBtnEl = document.getElementById('vrModeBtn');
+const wheelRewardBtnEl = document.getElementById('wheelRewardBtn');
+const wheelSpinBtnEl = document.getElementById('wheelSpinBtn');
+const muteBtnEl = document.getElementById('muteBtn');
+let currentTrackId = null;
 let last = null;
-let skipCalled = false;
-let interval = null;
+let lastFetchAt = 0;
+let resyncing = false;
+let srModeEnabled = false;
+let vrModeEnabled = false;
+let wheelRewardEnabled = false;
 
 function setStatus(text) {
   stateLabelEl.innerText = text;
@@ -148,12 +159,57 @@ function updateMeta(data) {
   metaEl.innerHTML = items.map((item) => `<div>${item}</div>`).join('');
 }
 
+// Автопереход только по факту окончания звука: сервер решает по trackId,
+// так что двойных скипов и «съеденных» треков больше нет
 player.addEventListener('ended', () => {
-  if (!skipCalled) {
-    skipCalled = true;
-    fetch('/api/skip', { method: 'POST' }).catch(err => console.error('Ошибка skip:', err));
+  if (!currentTrackId) return;
+  fetch('/api/track-ended', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ trackId: currentTrackId })
+  }).catch(err => console.error('Ошибка track-ended:', err));
+});
+
+// Синхронизирует позицию плеера с серверным таймером: после перезагрузки
+// страницы, паузы или рассинхрона звук продолжает с правильного места
+function resyncToServer() {
+  if (!last || !Number.isFinite(last.elapsed) || resyncing) return;
+  const target = last.elapsed;
+  if (Math.abs(player.currentTime - target) > 2.5 && Number.isFinite(player.duration)) {
+    resyncing = true;
+    try { player.currentTime = target; } catch (err) { /* seek до готовности */ }
+    setTimeout(() => { resyncing = false; }, 500);
+  }
+}
+
+player.addEventListener('loadedmetadata', resyncToServer);
+
+// Ошибка аудио (например, 404 от /audio в момент смены трека): сбрасываем
+// trackId, чтобы следующий опрос подставил src заново — иначе тишина
+// до ручного обновления страницы
+player.addEventListener('error', (e) => {
+  console.error('Ошибка аудио:', e);
+  if (currentTrackId && player.getAttribute('src')) {
+    currentTrackId = null;
   }
 });
+
+muteBtnEl.addEventListener('click', () => {
+  player.muted = !player.muted;
+  muteBtnEl.textContent = player.muted ? '🔇 Без звука' : '🔊 Звук';
+});
+
+function renderNoTrack() {
+  titleEl.innerText = 'Нет трека';
+  userEl.innerText = '';
+  barEl.style.width = '0%';
+  player.pause();
+  player.removeAttribute('src');
+  player.load();
+  currentTrackId = null;
+  last = null;
+  setStatus('Ожидание');
+}
 
 async function refreshQueue() {
   try {
@@ -171,23 +227,32 @@ async function update() {
     const data = await res.json();
     if (!data) return;
 
+    if (!data.trackId) {
+      if (currentTrackId !== null) renderNoTrack();
+      return;
+    }
+
     last = data;
+    lastFetchAt = Date.now();
     titleEl.innerText = data.title || 'Нет трека';
     userEl.innerText = data.requestedBy ? `Запрошено: ${data.requestedBy}` : '';
     updateMeta(data);
     modeBadgeEl.innerText = data.isSleepTrack ? 'Sleep' : 'Queue';
     setStatus(data.isPaused ? 'Пауза' : 'Играет');
 
-    const trackId = `${data.title || ''}|${data.requestedBy || ''}|${data.currentSource || ''}`;
-    if (trackId !== lastTrackId) {
+    if (data.trackId !== currentTrackId) {
+      currentTrackId = data.trackId;
       player.pause();
       player.src = '/audio?' + Date.now();
-      player.volume = 1;
       player.load();
       player.play().catch(err => console.log('Autoplay blocked:', err));
-      panel.classList.add('show');
-      lastTrackId = trackId;
-      skipCalled = false;
+    } else if (data.isPaused) {
+      if (!player.paused) player.pause();
+    } else {
+      resyncToServer();
+      if (player.paused && player.src) {
+        player.play().catch(err => console.log('Play blocked:', err));
+      }
     }
 
     await refreshQueue();
@@ -196,18 +261,61 @@ async function update() {
   }
 }
 
+clearQueueBtnEl.addEventListener('click', async () => {
+  if (!confirm('Вы точно хотите очистить очередь?')) {
+    return;
+  }
+
+  try {
+    const res = await fetch('/api/clear-queue', { method: 'POST' });
+    const data = await res.json();
+    if (!data.success) {
+      console.error('Ошибка очистки очереди:', data.error);
+      setStatus('Ошибка при очистке очереди');
+      return;
+    }
+    setStatus(`Очередь очищена (${data.refunded || 0} возвратов)`);
+    refreshQueue();
+  } catch (err) {
+    console.error('Ошибка очистки очереди:', err);
+    setStatus('Ошибка при очистке очереди');
+  }
+});
+
 function animate() {
   if (last && last.duration > 0) {
-    const percent = (last.elapsed / last.duration) * 100;
+    // локальная интерполяция между опросами сервера
+    const elapsed = last.isPaused ? last.elapsed : last.elapsed + (Date.now() - lastFetchAt) / 1000;
+    const percent = (elapsed / last.duration) * 100;
     barEl.style.width = Math.min(percent, 100) + '%';
     barEl.classList.toggle('paused', last.isPaused);
-    if (percent >= 100 && !skipCalled && !last.isPaused) {
-      skipCalled = true;
-      fetch('/api/skip', { method: 'POST' }).catch(err => console.error('Ошибка skip:', err));
-      clearInterval(interval);
-    }
   }
   requestAnimationFrame(animate);
+}
+
+function renderModeState(state = {}) {
+  srModeEnabled = state.srEnabled === true;
+  vrModeEnabled = state.vrEnabled === true;
+  wheelRewardEnabled = state.wheelEnabled === true;
+
+  const label = (name, value, enabled) => `${name}: ${value == null ? '?' : (enabled ? 'ON' : 'OFF')}`;
+  srModeBtnEl.textContent = label('SR', state.srEnabled, srModeEnabled);
+  vrModeBtnEl.textContent = label('VR', state.vrEnabled, vrModeEnabled);
+  wheelRewardBtnEl.textContent = label('Колесо', state.wheelEnabled, wheelRewardEnabled);
+
+  srModeBtnEl.classList.toggle('primary', srModeEnabled);
+  vrModeBtnEl.classList.toggle('primary', vrModeEnabled);
+  wheelRewardBtnEl.classList.toggle('primary', wheelRewardEnabled);
+}
+
+async function refreshModeState() {
+  try {
+    const res = await fetch('/api/modes');
+    const payload = await res.json();
+    renderModeState(payload);
+  } catch (err) {
+    console.error('Ошибка загрузки режимов:', err);
+  }
 }
 
 function setupSSE() {
@@ -218,38 +326,15 @@ function setupSSE() {
         const data = JSON.parse(e.data);
         refreshQueue().catch(err => console.error('Ошибка обновления очереди:', err));
         if (data.type === 'skip') {
-          titleEl.innerText = 'Нет трека';
-          userEl.innerText = '';
-          barEl.style.width = '0%';
-          panel.classList.remove('show');
-          player.pause();
-          player.src = '';
-          lastTrackId = null;
-          last = null;
-          skipCalled = false;
-          clearInterval(interval);
-          setStatus('Ожидание');
+          renderNoTrack();
         } else if (data.type === 'pause') {
           player.pause();
           setStatus('Пауза');
         } else if (data.type === 'play') {
-          player.play().catch(err => console.log('Play blocked:', err));
-          setStatus('Играет');
-        } else if (data.type === 'trackStart') {
           update();
-          interval = setInterval(update, 1000);
         } else {
-          last = data;
-          titleEl.innerText = data.title || 'Нет трека';
-          userEl.innerText = data.requestedBy ? `Запрошено: ${data.requestedBy}` : '';
-          updateMeta(data);
-          modeBadgeEl.innerText = data.isSleepTrack ? 'Sleep' : 'Queue';
-          setStatus(data.isPaused ? 'Пауза' : 'Играет');
-          if (data.isPaused) {
-            player.pause();
-          } else {
-            player.play().catch(err => console.log('Play blocked:', err));
-          }
+          // trackStart и обычные обновления состояния
+          update();
         }
       } catch (err) {
         console.error('SSE parse error:', err);
@@ -308,6 +393,50 @@ async function orderTrack() {
 document.getElementById('playBtn').addEventListener('click', () => control('play'));
 document.getElementById('pauseBtn').addEventListener('click', () => control('pause'));
 document.getElementById('skipBtn').addEventListener('click', () => control('skip'));
+// Общий переключатель режимов: после запроса состояние всегда
+// перечитывается с сервера — локальные кнопки не врут при сбоях
+// и подхватывают изменения, сделанные из чата (!srmode/!vrmode)
+async function toggleMode(url, label, nextState) {
+  setStatus(`Переключаю ${label}...`);
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: nextState })
+    });
+    const payload = await res.json();
+    if (payload.success) {
+      setStatus(`${label} ${nextState ? 'включён' : 'выключен'}`);
+    } else {
+      setStatus(`Не удалось переключить ${label}: ${payload.error || 'ошибка Twitch API'}`);
+    }
+  } catch (err) {
+    console.error(`Ошибка переключения ${label}:`, err);
+    setStatus(`Не удалось переключить ${label}`);
+  } finally {
+    await refreshModeState();
+  }
+}
+
+srModeBtnEl.addEventListener('click', () => toggleMode('/api/mode/sr', 'SR', !srModeEnabled));
+vrModeBtnEl.addEventListener('click', () => toggleMode('/api/mode/vr', 'VR', !vrModeEnabled));
+wheelRewardBtnEl.addEventListener('click', () => toggleMode('/api/wheel/reward', 'Колесо', !wheelRewardEnabled));
+wheelSpinBtnEl.addEventListener('click', async () => {
+  try {
+    const res = await fetch('/api/wheel/spin', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({})
+    });
+    const payload = await res.json();
+    if (payload.success) {
+      setStatus(`Колесо крутится${payload.selected ? `: ${payload.selected.label}` : ''}`);
+    }
+  } catch (err) {
+    console.error('Ошибка запуска колеса:', err);
+    setStatus('Не удалось запустить колесо');
+  }
+});
 orderBtnEl.addEventListener('click', orderTrack);
 orderQueryEl.addEventListener('keydown', (event) => {
   if (event.key === 'Enter') {
@@ -332,8 +461,15 @@ document.getElementById('sleepBtn').addEventListener('click', async () => {
 
 setupSSE();
 animate();
+setInterval(update, 1000);
 refreshQueue();
+refreshModeState();
 update();
+// состояние наград могло измениться из чата — периодически сверяемся
+setInterval(refreshModeState, 30000);
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) refreshModeState();
+});
 </script>
 </body>
 </html>

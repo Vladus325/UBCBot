@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { sendStreamNotification } = require('./discordHook');
-const { refreshTokenPair } = require('./tokens');
+const { makeApiCall } = require('./twitchApi');
 
 const STREAM_STATE_FILE = path.resolve(__dirname, '..', '..', '.streamState.json');
 
@@ -30,22 +30,18 @@ const CHECK_INTERVAL = 60000; // Проверять каждые 60 секунд
 
 async function getStreamStatus() {
     try {
-        // Обновляем токен перед API запросом
-        await refreshTokenPair('TWITCH_REFRESH_TOKEN_MY', 'TWITCH_TOKEN_MY');
-        
-        const response = await fetch(
+        // Токен обновляется автоматически только при 401 (внутри makeApiCall),
+        // а не каждую минуту: частый refresh изнашивает ротацию refresh-токенов
+        const response = await makeApiCall(
             `https://api.twitch.tv/helix/streams?user_id=${process.env.BROADCASTER_ID}`,
             {
                 headers: {
                     'Client-ID': process.env.CLIENT_ID_MY,
                     'Authorization': `Bearer ${process.env.TWITCH_TOKEN_MY}`
                 }
-            }
+            },
+            process.env.CLIENT_ID_MY
         );
-
-        if (!response.ok) {
-            throw new Error(`API error: ${response.statusText}`);
-        }
 
         const data = await response.json();
         return data.data && data.data.length > 0 ? data.data[0] : null;
@@ -57,22 +53,16 @@ async function getStreamStatus() {
 
 async function getChannelInfo() {
     try {
-        // Обновляем токен перед API запросом
-        await refreshTokenPair('TWITCH_REFRESH_TOKEN_MY', 'TWITCH_TOKEN_MY');
-        
-        const response = await fetch(
+        const response = await makeApiCall(
             `https://api.twitch.tv/helix/channels?broadcaster_id=${process.env.BROADCASTER_ID}`,
             {
                 headers: {
                     'Client-ID': process.env.CLIENT_ID_MY,
                     'Authorization': `Bearer ${process.env.TWITCH_TOKEN_MY}`
                 }
-            }
+            },
+            process.env.CLIENT_ID_MY
         );
-
-        if (!response.ok) {
-            throw new Error(`API error: ${response.statusText}`);
-        }
 
         const data = await response.json();
         return data.data && data.data.length > 0 ? data.data[0] : null;

@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Колесо выбора</title>
+<style>
+:root {
+  --ink: #17202a;
+  --muted: #66717d;
+  --paper: #f4f0e8;
+  --panel: rgba(255, 255, 255, 0.88);
+  --accent: #d8543c;
+  --accent-dark: #a83a2b;
+  --line: rgba(23, 32, 42, 0.14);
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  min-height: 100vh;
+  padding: 28px;
+  color: var(--ink);
+  font-family: Georgia, 'Times New Roman', serif;
+  background: radial-gradient(circle at 18% 12%, #fffaf0 0 16%, transparent 40%), linear-gradient(135deg, #d9e2e3, var(--paper) 48%, #e4d2c0);
+}
+body.widget-only { padding: 0; background: transparent; overflow: hidden; }
+body.widget-only .topbar, body.widget-only .settings, body.widget-only .result { display: none; }
+body.widget-only .app, body.widget-only .layout, body.widget-only .stage { width: 100%; height: 100vh; min-height: 0; max-width: none; }
+body.widget-only .layout { display: block; }
+body.widget-only .stage { position: fixed; inset: 0; display: grid; place-items: center; padding: 0; background: transparent; border: 0; box-shadow: none; opacity: 0; transform: scale(.82); transition: opacity .25s ease, transform .35s ease; }
+body.widget-only .stage::before { display: none; }
+body.widget-only .stage.active { opacity: 1; transform: scale(1); }
+body.widget-only .wheel-wrap { width: min(96vh, 96vw); }
+.announcement { display: none; }
+body.widget-only .announcement { position: fixed; z-index: 10; inset: 50% 8% auto; display: flex; flex-direction: column; align-items: center; gap: 12px; max-width: 84%; padding: 24px 34px 28px; border: 1px solid rgba(255,255,255,.32); border-radius: 14px; background: rgba(20,24,29,.86); box-shadow: 0 14px 45px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.12); backdrop-filter: blur(10px); transform: translateY(-50%) scale(.88); opacity: 0; color: #fffdf4; text-align: center; text-shadow: 0 3px 12px rgba(0,0,0,.75); transition: opacity .3s ease, transform .3s ease; pointer-events: none; }
+body.widget-only .announcement.active { transform: translateY(-50%) scale(1); opacity: 1; }
+.announcement-caption { font: 700 clamp(14px, 2.3vw, 28px)/1 Arial, sans-serif; letter-spacing: .08em; }
+.announcement-value { max-width: 100%; font: 700 clamp(24px, 5vw, 64px)/1.05 Arial, sans-serif; overflow-wrap: anywhere; }
+.app { max-width: 1180px; margin: 0 auto; }
+.topbar { display: flex; align-items: end; justify-content: space-between; gap: 20px; margin-bottom: 22px; }
+h1 { margin: 0; font-size: clamp(30px, 5vw, 58px); line-height: .95; letter-spacing: 0; }
+.subtitle { max-width: 340px; color: var(--muted); font: 14px/1.4 Arial, sans-serif; }
+.layout { display: grid; grid-template-columns: minmax(340px, 1fr) minmax(280px, 380px); gap: 24px; align-items: start; }
+.stage, .settings { border: 1px solid var(--line); background: var(--panel); box-shadow: 0 18px 50px rgba(63, 48, 31, .16); }
+.stage { position: relative; min-height: 660px; display: grid; place-items: center; padding: 44px 28px 32px; overflow: hidden; }
+.stage::before { content: ''; position: absolute; inset: 18px; border: 1px solid rgba(23, 32, 42, .1); pointer-events: none; }
+.wheel-wrap { position: relative; width: min(78vw, 590px); aspect-ratio: 1; }
+.pointer { position: absolute; z-index: 4; top: -17px; left: 50%; width: 0; height: 0; transform: translateX(-50%); border-left: 18px solid transparent; border-right: 18px solid transparent; border-top: 50px solid #d7473e; filter: drop-shadow(0 3px 2px rgba(0,0,0,.7)); }
+.wheel { position: absolute; inset: 0; border-radius: 50%; border: 5px solid #f4f4f4; box-shadow: 0 0 0 2px rgba(0,0,0,.55), 0 10px 28px rgba(0,0,0,.45); transition: transform 5s cubic-bezier(.08,.82,.18,1); overflow: hidden; }
+.wheel::after { content: ''; position: absolute; inset: 0; border-radius: 50%; box-shadow: inset 0 0 0 2px rgba(255,255,255,.7), inset 0 0 30px rgba(0,0,0,.18); pointer-events: none; }
+.label { position: absolute; z-index: 1; top: 50%; left: 50%; width: 48%; height: 24%; margin: 0; transform-origin: 50% 50%; display: flex; align-items: center; justify-content: center; padding: 0 4px; text-align: center; font: 700 clamp(10px, 1.45vw, 15px)/1.12 Arial, sans-serif; color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,.75); overflow: hidden; }
+.label-text { display: -webkit-box; max-width: 100%; max-height: 3.36em; overflow: hidden; text-overflow: ellipsis; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow-wrap: break-word; word-break: normal; }
+.hub { position: absolute; z-index: 3; inset: 50% auto auto 50%; width: 20%; aspect-ratio: 1; transform: translate(-50%, -50%); border: 3px solid #f4f4f4; border-radius: 50%; background: #273845; box-shadow: 0 0 0 2px rgba(0,0,0,.5); display: grid; place-items: center; overflow: hidden; }
+.hub img { width: 100%; height: 100%; object-fit: cover; display: none; }
+.hub.has-image img { display: block; }
+.hub.has-image span { display: none; }
+.hub span { color: #f9d08e; font: 700 11px Arial, sans-serif; text-align: center; padding: 8px; }
+.result { min-height: 30px; margin-top: 30px; text-align: center; font: 700 22px/1.2 Arial, sans-serif; color: var(--accent-dark); }
+.settings { padding: 22px; }
+.settings h2 { margin: 0 0 17px; font-size: 24px; }
+.field { display: grid; gap: 7px; margin-top: 15px; }
+label { font: 700 12px Arial, sans-serif; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+input { width: 100%; border: 1px solid var(--line); border-radius: 4px; padding: 11px 12px; background: #fffdf7; color: var(--ink); font: 14px Arial, sans-serif; }
+input:focus { outline: 2px solid rgba(216,84,60,.3); border-color: var(--accent); }
+.actions { display: grid; grid-template-columns: 1fr auto; gap: 9px; margin-top: 20px; }
+button { border: 0; border-radius: 3px; padding: 13px 15px; cursor: pointer; font: 700 13px Arial, sans-serif; color: #fff; background: #324956; }
+button:hover { background: #223743; }
+button.primary { background: var(--accent); font-size: 15px; }
+button.primary:hover { background: var(--accent-dark); }
+button:disabled { cursor: wait; opacity: .6; }
+.note { margin: 18px 0 0; color: var(--muted); font: 12px/1.45 Arial, sans-serif; }
+.status { min-height: 18px; margin-top: 13px; color: var(--accent-dark); font: 700 12px Arial, sans-serif; }
+.entries { margin-top: 22px; border-top: 1px solid var(--line); padding: 14px 8px 0 0; max-height: 220px; overflow-x: hidden; overflow-y: auto; scrollbar-gutter: stable; }
+.entry { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) 42px; align-items: center; gap: 8px; min-height: 32px; padding: 7px 0; border-bottom: 1px solid rgba(23,32,42,.08); font: 13px/1.25 Arial, sans-serif; }
+.entry span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.entry span:last-child { position: relative; z-index: 1; right: 10px; width: 42px; padding-left: 8px; color: var(--accent-dark); background: #fffdf7; font-weight: 700; text-align: right; }
+@media (max-width: 800px) {
+  body { padding: 16px; }
+  .topbar { display: block; }
+  .subtitle { margin-top: 12px; }
+  .layout { grid-template-columns: 1fr; }
+  .stage { min-height: auto; padding: 30px 12px 20px; }
+  .wheel-wrap { width: min(88vw, 590px); }
+}
+</style>
+</head>
+<body>
+<main class="app">
+  <header class="topbar">
+    <h1>Колесо выбора</h1>
+    <div class="subtitle">Сектора получают шанс из числа после символа <strong>|</strong>. Нажмите на кнопку, чтобы выбрать испытание.</div>
+  </header>
+  <section class="layout">
+    <div class="stage">
+      <div class="wheel-wrap">
+        <div class="pointer"></div>
+        <div class="wheel" id="wheel"></div>
+        <div class="hub" id="hub"><img id="hubImage" alt=""><span>ВЫБОР</span></div>
+      </div>
+      <div class="result" id="result">Загрузка вариантов...</div>
+    </div>
+    <aside class="settings">
+      <h2>Настройки</h2>
+      <div class="field"><label for="duration">Время вращения, секунд</label><input id="duration" type="number" min="1" max="60" step="1" value="8"></div>
+      <div class="field"><label for="music">Музыка во время вращения</label><input id="music" type="text" placeholder="C:\Users\Vladus\Music\spin.mp3 или https://..."></div>
+      <div class="field"><label for="image">Картинка в центре</label><input id="image" type="text" placeholder="C:\Users\Vladus\Pictures\logo.jpg или https://..."></div>
+      <div class="actions"><button class="primary" id="spin" disabled>Крутить колесо</button><button id="reload">Обновить</button></div>
+      <div class="status" id="status"></div>
+      <p class="note">Настройки сохраняются в этом браузере. Для OBS можно использовать ссылку <strong>/wheel</strong>, а запускать колесо прямо в источнике браузера.</p>
+      <div class="entries" id="entries"></div>
+    </aside>
+  </section>
+</main>
+<div class="announcement" id="announcement"><div class="announcement-caption">ВЫПАЛО</div><div class="announcement-value" id="announcementValue"></div></div>
+<audio id="audio" preload="auto"></audio>
+<script>
+const wheelEl = document.getElementById('wheel');
+const hubEl = document.getElementById('hub');
+const hubImageEl = document.getElementById('hubImage');
+const resultEl = document.getElementById('result');
+const statusEl = document.getElementById('status');
+const entriesEl = document.getElementById('entries');
+const spinButton = document.getElementById('spin');
+const durationInput = document.getElementById('duration');
+const musicInput = document.getElementById('music');
+const imageInput = document.getElementById('image');
+const audio = document.getElementById('audio');
+const announcementEl = document.getElementById('announcement');
+const announcementValueEl = document.getElementById('announcementValue');
+const widgetOnly = location.pathname.endsWith('/wheel-widget');
+if (widgetOnly) document.body.classList.add('widget-only');
+let entries = [];
+let rotation = 0;
+let spinning = false;
+let announcementTimer = null;
+let fadeTimer = null;
+
+const colors = ['#d8543c', '#315c6b', '#e09b3d', '#7b5365', '#3e806d', '#bd6e3f', '#3f6489', '#96623b'];
+
+function saveSettings() {
+  const settings = { duration: durationInput.value, music: musicInput.value, image: imageInput.value };
+  localStorage.setItem('wheel-settings', JSON.stringify(settings));
+  fetch('/api/wheel/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings) })
+    .catch(error => console.warn('Не удалось сохранить настройки колеса:', error));
+}
+
+async function loadSettings() {
+  try {
+    const settings = JSON.parse(localStorage.getItem('wheel-settings') || '{}');
+    if (settings.duration) durationInput.value = settings.duration;
+    if (settings.music) musicInput.value = settings.music;
+    if (settings.image) imageInput.value = settings.image;
+  } catch (_) { /* empty settings are fine */ }
+  try {
+    const response = await fetch('/api/wheel/settings?time=' + Date.now());
+    if (response.ok) {
+      const settings = await response.json();
+      durationInput.value = settings.duration || durationInput.value;
+      musicInput.value = settings.music || musicInput.value;
+      imageInput.value = settings.image || imageInput.value;
+    }
+  } catch (error) {
+    console.warn('Не удалось загрузить настройки колеса:', error);
+  }
+  updateImage();
+}
+
+function updateImage() {
+  const source = imageInput.value.trim();
+  hubImageEl.src = resolveMediaSource(source);
+  hubEl.classList.toggle('has-image', Boolean(source));
+  hubImageEl.onerror = () => hubEl.classList.remove('has-image');
+}
+
+function resolveMediaSource(source) {
+  if (/^[a-zA-Z]:[\\/]/.test(source) || source.startsWith('\\\\')) {
+    return `/api/wheel-asset?path=${encodeURIComponent(source)}`;
+  }
+  return source;
+}
+
+function pickEntry() {
+  const total = entries.reduce((sum, entry) => sum + entry.weight, 0);
+  let point = Math.random() * total;
+  return entries.find(entry => {
+    point -= entry.weight;
+    return point <= 0;
+  }) || entries[entries.length - 1];
+}
+
+function renderWheel() {
+  const total = entries.reduce((sum, entry) => sum + entry.weight, 0);
+  let cursor = 0;
+  const stops = [];
+  wheelEl.innerHTML = '';
+  entriesEl.innerHTML = '';
+  entries.forEach((entry, index) => {
+    const start = cursor / total * 360;
+    cursor += entry.weight;
+    const end = cursor / total * 360;
+    const gapStart = Math.max(start, end - 1.4);
+    stops.push(`${colors[index % colors.length]} ${start}deg ${gapStart}deg`, `#fffdf4 ${gapStart}deg ${end}deg`);
+    const label = document.createElement('div');
+    const center = (start + end) / 2;
+    label.className = 'label';
+    const radius = Math.min(245, Math.max(105, wheelEl.clientWidth * 0.31));
+    label.style.transform = `translate(-50%, -50%) rotate(${center}deg) translateY(-${radius}px) rotate(-90deg)`;
+    const sectorSize = end - start;
+    const labelText = document.createElement('span');
+    labelText.className = 'label-text';
+    labelText.textContent = sectorSize < 12 ? '...' : entry.label;
+    label.appendChild(labelText);
+    wheelEl.appendChild(label);
+
+    const row = document.createElement('div');
+    row.className = 'entry';
+    row.innerHTML = `<span>${escapeHtml(entry.label)}</span><span>${entry.weight}</span>`;
+    entriesEl.appendChild(row);
+    entry.start = start;
+    entry.end = end;
+  });
+  wheelEl.style.background = `conic-gradient(${stops.join(', ')})`;
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character]));
+}
+
+async function loadEntries() {
+  spinButton.disabled = true;
+  statusEl.textContent = 'Читаю wheel_config.txt...';
+  try {
+    const response = await fetch('/api/wheel?time=' + Date.now());
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Ошибка загрузки');
+    entries = data.entries;
+    renderWheel();
+    resultEl.textContent = `${entries.length} вариантов готовы`;
+    statusEl.textContent = '';
+    spinButton.disabled = false;
+  } catch (error) {
+    statusEl.textContent = error.message;
+    resultEl.textContent = 'Не удалось загрузить колесо';
+  }
+}
+
+function startMusic() {
+  const source = (musicInput.value || '').trim();
+  if (!source) {
+    console.warn('Музыка колеса не настроена');
+    return Promise.resolve(false);
+  }
+
+  audio.src = resolveMediaSource(source);
+  audio.currentTime = 0;
+  audio.loop = true;
+  audio.volume = 1;
+  audio.muted = false;
+
+  return audio.play().then(() => true).catch((error) => {
+    console.warn('Автоплей музыки колеса заблокирован, пробуем повторно:', error);
+    audio.muted = true;
+    return audio.play().then(() => {
+      audio.muted = false;
+      return true;
+    }).catch(() => {
+      statusEl.textContent = 'Браузер заблокировал музыку колеса. Нажмите на страницу, чтобы разрешить звук.';
+      return false;
+    });
+  });
+}
+
+function fadeOutMusic() {
+  if (fadeTimer) window.clearInterval(fadeTimer);
+  if (audio.paused) return;
+  const startedAt = Date.now();
+  const fadeDuration = 900;
+  fadeTimer = window.setInterval(() => {
+    const progress = Math.min(1, (Date.now() - startedAt) / fadeDuration);
+    audio.volume = 1 - progress;
+    if (progress >= 1) {
+      window.clearInterval(fadeTimer);
+      fadeTimer = null;
+      audio.pause();
+      audio.currentTime = 0;
+      audio.volume = 1;
+    }
+  }, 40);
+}
+
+function spin() {
+  if (spinning || !entries.length) return;
+  saveSettings();
+  updateImage();
+  const selected = pickEntry();
+  if (!widgetOnly) {
+    fetch('/api/wheel/spin', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ index: selected.index, duration: durationInput.value, image: imageInput.value, music: musicInput.value })
+    }).catch(error => { statusEl.textContent = `OBS не получил запуск: ${error.message}`; });
+  }
+  startMusic().catch(() => {});
+  animateSpin(selected, Number(durationInput.value) || 8);
+}
+
+function animateSpin(selected, duration) {
+  if (spinning) return;
+  spinning = true;
+  spinButton.disabled = true;
+  if (announcementTimer) window.clearTimeout(announcementTimer);
+  announcementEl.classList.remove('active');
+  if (widgetOnly) document.querySelector('.stage').classList.add('active');
+  const center = (selected.start + selected.end) / 2;
+  const correction = (360 - center - (rotation % 360) + 360) % 360;
+  const extraTurns = 3 + Math.floor(Math.random() * 2);
+  const delta = extraTurns * 360 + correction;
+  rotation += delta;
+  wheelEl.style.transitionDuration = `${Math.max(1, duration)}s`;
+  wheelEl.style.transform = `rotate(${rotation}deg)`;
+  resultEl.textContent = 'Колесо вращается...';
+  startMusic().catch(() => {});
+  window.setTimeout(() => {
+    fadeOutMusic();
+    if (!widgetOnly) {
+      resultEl.textContent = selected.label;
+      statusEl.textContent = 'Выбор завершён';
+    } else {
+      document.querySelector('.stage').classList.remove('active');
+      announcementValueEl.textContent = selected.label;
+      announcementEl.classList.add('active');
+      announcementTimer = window.setTimeout(() => announcementEl.classList.remove('active'), 5000);
+    }
+    spinning = false;
+    spinButton.disabled = false;
+  }, Math.max(1, duration) * 1000);
+}
+
+if (widgetOnly) {
+  const wheelEvents = new EventSource('/api/wheel/events');
+  wheelEvents.onmessage = event => {
+    const payload = JSON.parse(event.data);
+    if (payload.type !== 'spin' || !entries.length) return;
+    imageInput.value = payload.image || imageInput.value;
+    musicInput.value = payload.music || musicInput.value;
+    updateImage();
+    const selected = entries.find(entry => entry.index === payload.index);
+    if (selected) {
+      startMusic().catch(() => {});
+      animateSpin(selected, Number(payload.duration) || 8);
+    }
+  };
+}
+
+[durationInput, musicInput, imageInput].forEach(input => input.addEventListener('change', () => {
+  saveSettings();
+  if (input === imageInput) updateImage();
+}));
+spinButton.addEventListener('click', spin);
+document.getElementById('reload').addEventListener('click', loadEntries);
+loadSettings();
+loadEntries();
+</script>
+</body>
+</html>

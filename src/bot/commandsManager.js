@@ -1,20 +1,22 @@
 const fs = require('fs');
+const path = require('path');
 const db = require('./database');
 const { timeoutUser, toggleReward } = require('./twitchApi');
 const musicQueue = require('../music/musicQueue');
-const fetch = require('node-fetch');
+
+const CONFIG_DIR = path.join(__dirname, '..', 'config');
 let commands = {};
 
 const SKIP_COSTS = { 1: 1, 2: 3, 3: 5 };
 
 const compliments = JSON.parse(
-    fs.readFileSync('./src/config/compliments.json', 'utf-8')
+    fs.readFileSync(path.join(CONFIG_DIR, 'compliments.json'), 'utf-8')
 );
 
 // =========================
 // Загрузка команд
 // =========================
-function loadCommands(filePath = 'src/config/commands.json') {
+function loadCommands(filePath = path.join(CONFIG_DIR, 'commands.json')) {
     try {
         const data = fs.readFileSync(filePath, 'utf-8');
         commands = JSON.parse(data);
@@ -178,9 +180,14 @@ async function processText(text, tags, channel, args = []) {
                 || args.join(' ').trim().toLowerCase() === "disable");
 
                 if (tags.mod || tags.badges?.broadcaster) {
-                    handleMode(V_REWARDS, arg);
-                    handleMode(SR_REWARDS, arg);
-                    replacement = `${tags.username}, VR Режим: ${arg ? 'Выключен' : 'Включён'}`;
+                    try {
+                        await handleMode(V_REWARDS, arg);
+                        await handleMode(SR_REWARDS, arg);
+                        replacement = `${tags.username}, VR Режим: ${arg ? 'Выключен' : 'Включён'}`;
+                    } catch (err) {
+                        console.error('VR mode toggle failed:', err);
+                        replacement = `${tags.username}, не удалось изменить VR режим, проверьте логи.`;
+                    }
                 }
                 break; 
             }
@@ -191,9 +198,51 @@ async function processText(text, tags, channel, args = []) {
                 || args.join(' ').trim().toLowerCase() === "enable");
                 
                 if (tags.mod || tags.badges?.broadcaster) {
-                    handleMode(SR_REWARDS, arg);
-                    replacement = `${tags.username}, SR Режим: ${arg ? 'Включён' : 'Выключен'}`;
+                    try {
+                        await handleMode(SR_REWARDS, arg);
+                        replacement = `${tags.username}, SR Режим: ${arg ? 'Включён' : 'Выключен'}`;
+                    } catch (err) {
+                        console.error('SR mode toggle failed:', err);
+                        replacement = `${tags.username}, не удалось изменить SR режим, проверьте логи.`;
+                    }
                 }
+                break;
+            }
+
+            case 'order': {
+                const query = args.join(' ').trim();
+                if (!query) {
+                    replacement = `${tags.username}, укажи ссылку или название трека: !play <запрос>`;
+                    break;
+                }
+                if (musicQueue.countUserTracks(tags.username) >= 2) {
+                    replacement = `${tags.username}, у тебя уже максимум треков в очереди, дождись своей очереди 😉`;
+                    break;
+                }
+                try {
+                    const track = await musicQueue.add(query, tags.username, 1, null, { allowLocal: false });
+                    replacement = `🎵 ${tags.username} добавил: ${track.title}`;
+                } catch (err) {
+                    replacement = `${tags.username}, не удалось добавить трек: ${err.message}`;
+                }
+                break;
+            }
+
+            case 'queue': {
+                const snapshot = musicQueue.getQueueSnapshot();
+                if (!snapshot.current && snapshot.queueLength === 0) {
+                    replacement = 'Очередь пуста';
+                    break;
+                }
+                const parts = [];
+                if (snapshot.current) {
+                    parts.push(`сейчас: ${snapshot.current.title} (${snapshot.current.requestedBy})`);
+                }
+                for (const item of snapshot.upcoming.slice(0, 3)) {
+                    parts.push(`${item.title} (${item.requestedBy})`);
+                }
+                const extra = snapshot.queueLength - Math.min(snapshot.queueLength, 3);
+                replacement = `🎵 ${parts.join(' → ')}${extra > 0 ? ` (и ещё ${extra})` : ''}`;
                 break;
             }
 
@@ -203,14 +252,20 @@ async function processText(text, tags, channel, args = []) {
                     musicQueue.skip();
                     replacement = '⏭ Пропущено модератором';
                 } else {
-                    const skipCost = SKIP_COSTS[musicQueue.current.level];
-                    const luckPoints = db.getLuckPoints(tags.username);
-                    if (luckPoints >= skipCost) {
-                        db.removeLuckPoint(skipCost, tags.username);
+                    const skipCost = SKIP_COSTS[musicQueue.current.level] || 0;
+                    if (skipCost === 0) {
+                        // спящий плейлист и треки без уровня пропускаются бесплатно
                         musicQueue.skip();
-                        replacement = `⏭ Пропущено за ${skipCost} 🍀 (осталось: ${luckPoints - skipCost})`;
+                        replacement = '⏭ Пропущено';
                     } else {
-                        replacement = `Недостаточно очков удачи для пропуска (нужен ${skipCost} 🍀)`;
+                        const luckPoints = db.getLuckPoints(tags.username);
+                        if (luckPoints >= skipCost) {
+                            db.removeLuckPoint(skipCost, tags.username);
+                            musicQueue.skip();
+                            replacement = `⏭ Пропущено за ${skipCost} 🍀 (осталось: ${luckPoints - skipCost})`;
+                        } else {
+                            replacement = `Недостаточно очков удачи для пропуска (нужен ${skipCost} 🍀)`;
+                        }
                     }
                 }
                 break;
@@ -226,8 +281,10 @@ async function processText(text, tags, channel, args = []) {
             case 'pause': {
                 if (tags.mod || tags.badges?.broadcaster) {
                     if (!musicQueue.current) replacement = 'Нечего ставить на паузу';
-                    else if (musicQueue.isPaused) replacement = 'Уже на паузе';
-                    else {
+                    else if (musicQueue.isPaused) {
+                        musicQueue.play();
+                        replacement = '▶ Возобновлено';
+                    } else {
                         musicQueue.pause();
                         replacement = '⏸ Пауза';
                     }
@@ -289,10 +346,26 @@ async function getAIResponse(message, username) {
         throw new Error('AI_API_KEY not set');
     }
 
+    // AI_BASE_URL — конфиг оператора, а не ввод из чата (сообщение зрителя
+    // уходит только в тело запроса). По умолчанию строго https; внутренний
+    // http (свой LLM) — только явным opt-in через AI_ALLOW_LOCAL_HTTP=1
+    let baseUrl;
+    try {
+        baseUrl = new URL(process.env.AI_BASE_URL);
+    } catch {
+        throw new Error('AI_BASE_URL некорректен');
+    }
+    const isLocalHttpAllowed = process.env.AI_ALLOW_LOCAL_HTTP === '1'
+        && baseUrl.protocol === 'http:'
+        && /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(baseUrl.host);
+    if (baseUrl.protocol !== 'https:' && !isLocalHttpAllowed) {
+        throw new Error(`AI_BASE_URL: допускается только https${process.env.AI_ALLOW_LOCAL_HTTP === '1' ? ' или локальный http' : ' (для локального LLM установи AI_ALLOW_LOCAL_HTTP=1)'} (${baseUrl.protocol}//${baseUrl.host})`);
+    }
+
     // Читаем промпт из файла
     let systemPrompt;
     try {
-        systemPrompt = fs.readFileSync('./src/config/ai_prompt.txt', 'utf-8').trim();
+        systemPrompt = fs.readFileSync(path.join(CONFIG_DIR, 'ai_prompt.txt'), 'utf-8').trim();
     } catch (err) {
         console.error('Ошибка чтения ai_prompt.txt:', err);
         systemPrompt = 'Ты — дружелюбный чат-бот на Twitch. Отвечай коротко и по-русски.';
@@ -301,7 +374,7 @@ async function getAIResponse(message, username) {
     // Добавляем информацию о пользователе в начало сообщения
     const userMessageWithContext = `[Сообщение от ${username}]: ${message}`;
 
-    const response = await fetch(process.env.AI_BASE_URL, {
+    const response = await fetch(baseUrl, {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',

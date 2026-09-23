@@ -88,133 +88,144 @@ body {
 const player = document.getElementById('player');
 const container = document.getElementById('container');
 
-let lastTrackId = null;
+let currentTrackId = null;
 let last = null;
-let skipCalled = false;
-let interval = null;
+let lastFetchAt = 0;
+let resyncing = false;
 
-// Обработчик окончания трека
+// Автопереход только по этому событию: сервер сам решает, пора ли
+// (trackId + дебаунс на его стороне), так что двойных скипов нет
 player.addEventListener('ended', () => {
-    if (!skipCalled) {
-        skipCalled = true;
-        fetch('/api/skip', { method: 'POST' }).catch(err => console.error('Ошибка skip:', err));
-    }
+  if (!currentTrackId) return;
+  fetch('/api/track-ended', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ trackId: currentTrackId })
+  }).catch(err => console.error('Ошибка track-ended:', err));
 });
 
 player.addEventListener('error', (e) => {
-    console.error('Ошибка аудио:', e);
+  console.error('Ошибка аудио:', e);
+  // Например, 404 от /audio в момент смены трека: сбросим trackId,
+  // чтобы следующий опрос подставил src заново, а не молчал до ручного
+  // обновления источника
+  if (currentTrackId && player.getAttribute('src')) {
+    currentTrackId = null;
+  }
 });
 
+// Синхронизирует позицию плеера с серверерным таймером: после перезагрузки
+// overlay, паузы или рассинхрона звук продолжает с правильного места
+function resyncToServer() {
+  if (!last || !Number.isFinite(last.elapsed) || resyncing) return;
+  const target = last.elapsed;
+  if (Math.abs(player.currentTime - target) > 2.5 && Number.isFinite(player.duration)) {
+    resyncing = true;
+    try { player.currentTime = target; } catch (err) { /* seek до готовности */ }
+    setTimeout(() => { resyncing = false; }, 500);
+  }
+}
+
+player.addEventListener('loadedmetadata', resyncToServer);
+
+function renderState(data) {
+  if (!data) return;
+  last = data;
+  lastFetchAt = Date.now();
+  document.getElementById('title').innerText = data.title || 'Нет трека';
+  document.getElementById('user').innerText = data.requestedBy ? `Запрошено: ${data.requestedBy}` : '';
+}
+
 async function update() {
-    try {
-        const res = await fetch('/api/now');
-        const data = await res.json();
-
-        if (!data) return;
-
-        document.getElementById('title').innerText = data.title;
-        document.getElementById('user').innerText = `Запрошено: ${data.requestedBy}`;
-
-        last = data;
-
-        const trackId = data.title + data.requestedBy;
-
-        if (trackId !== lastTrackId) {
-
-            player.pause(); // Останавливаем предыдущий трек
-            player.src = '/audio?' + Date.now(); // анти-кеш
-            player.volume = 1;
-            player.load(); // Перезагружаем аудио
-
-            player.play().catch(err => {
-                console.log('Autoplay blocked:', err);
-            });
-
-            container.classList.add('show');
-
-            lastTrackId = trackId;
-            skipCalled = false; // Reset flag for new track
-        }
-
-    } catch (e) {
-        console.error('Ошибка overlay:', e);
+  try {
+    const res = await fetch('/api/now');
+    const data = await res.json();
+    if (!data || !data.trackId) {
+      if (currentTrackId !== null && (!data || !data.trackId)) {
+        // трек закончился и очередь пуста
+        currentTrackId = null;
+        last = null;
+        container.classList.remove('show');
+        player.pause();
+        player.removeAttribute('src');
+        player.load();
+      }
+      return;
     }
+
+    renderState(data);
+
+    if (data.trackId !== currentTrackId) {
+      currentTrackId = data.trackId;
+      player.pause();
+      player.src = '/audio?' + Date.now();
+      player.volume = 1;
+      player.load();
+      player.play().catch(err => console.log('Autoplay blocked:', err));
+      container.classList.add('show');
+    } else if (data.isPaused) {
+      if (!player.paused) player.pause();
+    } else {
+      resyncToServer();
+      if (player.paused && player.src) {
+        player.play().catch(err => console.log('Play blocked:', err));
+      }
+    }
+  } catch (e) {
+    console.error('Ошибка overlay:', e);
+  }
 }
 
 function animate() {
-    if (last && last.duration > 0) {
-        const percent = (last.elapsed / last.duration) * 100;
-        const bar = document.getElementById('bar');
-        bar.style.width = Math.min(percent, 100) + '%';
-        bar.classList.toggle('paused', last.isPaused);
-
-        // If track has ended based on progress, skip to next (but not if paused)
-        if (percent >= 100 && !skipCalled && !last.isPaused) {
-            skipCalled = true;
-            fetch('/api/skip', { method: 'POST' }).catch(err => console.error('Ошибка skip:', err));
-            clearInterval(interval);
-        }
-    }
-
-    requestAnimationFrame(animate);
+  if (last && last.duration > 0) {
+    const playing = !last.isPaused;
+    // локальная интерполяция между опросами сервера
+    const elapsed = last.isPaused ? last.elapsed : last.elapsed + (Date.now() - lastFetchAt) / 1000;
+    const percent = Math.min((elapsed / last.duration) * 100, 100);
+    document.getElementById('bar').style.width = percent + '%';
+    document.getElementById('bar').classList.toggle('paused', !playing);
+  }
+  requestAnimationFrame(animate);
 }
 
-// Подключаемся к SSE для real-time обновлений
+// Подключаемся к SSE для realtime обновлений
 function setupSSE() {
-    try {
-        const eventSource = new EventSource('/api/events');
+  try {
+    const eventSource = new EventSource('/api/events');
 
-        eventSource.onmessage = (e) => {
-            try {
-                const data = JSON.parse(e.data);
-                
-                if (data.type === 'skip') {
-                    document.getElementById('title').innerText = 'Нет трека';
-                    document.getElementById('user').innerText = '';
-                    document.getElementById('bar').style.width = '0%';
-                    container.classList.remove('show');
-                    player.pause();
-                    player.src = '';
-                    lastTrackId = null;
-                    last = null;
-                    skipCalled = false;
+    eventSource.onmessage = (e) => {
+      try {
+        const data = JSON.parse(e.data);
 
-                    clearInterval(interval);
-                } else if (data.type === 'pause') {
-                    player.pause();
-                } else if (data.type === 'play') {
-                    player.play().catch(err => console.log('Play blocked:', err));
-                } else if (data.type === 'trackStart') {
-                    update();
-                    interval = setInterval(update, 1000);
-                } else {
-                    // Обычное обновление состояния
-                    last = data;
-                    document.getElementById('title').innerText = data.title || 'Нет трека';
-                    if (data.requestedBy) {
-                        document.getElementById('user').innerText = `Запрошено: ${data.requestedBy}`;
-                    }
-                    if (data.isPaused) {
-                        player.pause();
-                    } else {
-                        player.play().catch(err => console.log('Play blocked:', err));
-                    }
-                }
-            } catch (err) {
-                console.error('SSE parse error:', err);
-            }
-        };
+        if (data.type === 'skip') {
+          currentTrackId = null;
+          last = null;
+          container.classList.remove('show');
+          player.pause();
+          player.removeAttribute('src');
+          player.load();
+        } else if (data.type === 'pause') {
+          player.pause();
+        } else if (data.type === 'play') {
+          update();
+        } else if (data.type === 'trackStart' || data.trackId) {
+          update();
+        }
+      } catch (err) {
+        console.error('SSE parse error:', err);
+      }
+    };
 
-        eventSource.onerror = (e) => {
-            console.log('SSE connection error:', e);
-        };
+    eventSource.onerror = () => {};
 
-    } catch (err) {
-        console.error('SSE setup error:', err);
-    }
+  } catch (err) {
+    console.error('SSE setup error:', err);
+  }
 }
 
 setupSSE();
+setInterval(update, 1000);
+update();
 animate();
 </script>
 

@@ -6,7 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const EventEmitter = require('events');
-const { setSourceVisibility } = require('../bot/obsHook');
+const { cancelRedemption } = require('../bot/twitchApi');
 
 function parseYtDlpExtraArgs(rawArgs = '') {
     const args = [];
@@ -44,21 +44,49 @@ function normalizeYtDlpError(stderr = '') {
     if (!text) return 'unknown error';
 
     if (/Sign in to confirm/i.test(text)) {
-        return 'требуется авторизация YouTube через cookies (см. README для YT_DLP_EXTRA_ARGS)';
+        return 'YouTube требует проверку. Проверьте cookies в YT_DLP_COOKIES и работу bgutil PO Token provider на 127.0.0.1:4416';
     }
-    if (/HTTP Error 429/i.test(text)) {
-        return 'Too Many Requests (429) — попробуйте передать cookies или сменить браузерные данные';
+    if (/HTTP Error 403|HTTP Error 429|Forbidden/i.test(text)) {
+        return 'YouTube заблокировал запрос (403/429). Проверьте cookies в YT_DLP_COOKIES, установленный bgutil-ytdlp-pot-provider и сервер на 127.0.0.1:4416';
     }
     if (/Missing required Visitor Data/i.test(text)) {
-        return 'Не хватает Visitor Data; используйте --extractor-args "youtube:visitor_data=XXX"';
+        return 'bgutil не смог получить Visitor Data. Проверьте, что bgutil-ytdlp-pot-provider установлен и сервер работает на 127.0.0.1:4416';
     }
 
     return text;
 }
 
+function buildYtDlpExtraArgs() {
+    const args = parseYtDlpExtraArgs(process.env.YT_DLP_EXTRA_ARGS || '');
+    const argsText = args.join(' ');
+    const cookiesPath = process.env.YT_DLP_COOKIES || path.join(process.cwd(), 'cookies.txt');
+
+    if (fs.existsSync(cookiesPath) && !/(^|\s)--cookies(?:-from-browser)?(?:\s|$)/.test(argsText)) {
+        args.push('--cookies', cookiesPath);
+    }
+
+    const potProvider = process.env.YT_DLP_POT_PROVIDER || 'bgutil:http';
+    if (potProvider !== 'off' && !/youtubepot-bgutil(?::)?(?:http|script)/.test(argsText)) {
+        const potServerUrl = process.env.YT_DLP_POT_SERVER_URL || 'http://127.0.0.1:4416';
+        const providerName = potProvider.replace(':', '');
+        args.push('--extractor-args', `youtubepot-${providerName}:base_url=${potServerUrl}`);
+    }
+
+    const poToken = process.env.YT_DLP_PO_TOKEN;
+    const visitorData = process.env.YT_DLP_VISITOR_DATA;
+    if ((poToken || visitorData) && !/po_token=/.test(argsText)) {
+        const extractorArgs = [];
+        if (poToken) extractorArgs.push(`po_token=web+${poToken}`);
+        if (visitorData) extractorArgs.push(`visitor_data=${visitorData}`);
+        args.push('--extractor-args', `youtube:${extractorArgs.join(';')}`);
+    }
+
+    return args;
+}
+
 function buildYtDlpSpawnSpec(extraArgs = []) {
     const candidates = [];
-    const envArgs = parseYtDlpExtraArgs(process.env.YT_DLP_EXTRA_ARGS || '');
+    const envArgs = buildYtDlpExtraArgs();
     const mergedArgs = [...envArgs, ...extraArgs];
 
     if (process.env.YT_DLP_PATH) {
@@ -86,6 +114,14 @@ function buildYtDlpSpawnSpec(extraArgs = []) {
 
 function spawnYtDlp(extraArgs = []) {
     const candidates = buildYtDlpSpawnSpec(extraArgs);
+    const bundledToolPaths = [
+        path.dirname(ffmpegPath),
+        path.dirname(ffprobePath.path || ffprobePath)
+    ];
+    const spawnEnv = {
+        ...process.env,
+        PATH: [...bundledToolPaths, process.env.PATH || ''].join(path.delimiter)
+    };
 
     return new Promise((resolve, reject) => {
         let lastError = null;
@@ -98,6 +134,7 @@ function spawnYtDlp(extraArgs = []) {
             const { command, args } = candidates[index];
             const child = spawn(command, args, {
                 stdio: ['ignore', 'pipe', 'pipe'],
+                env: spawnEnv,
                 shell: false
             });
 
@@ -125,13 +162,31 @@ function probeFile(filePath) {
     });
 }
 
+async function probeDuration(filePath) {
+    const metadata = await probeFile(filePath);
+    const duration = metadata?.format?.duration;
+    return duration ? Math.floor(duration) : 0;
+}
+
 const CACHE_DIR = path.join(__dirname, 'audio_cache');
 if (!fs.existsSync(CACHE_DIR)) {
     fs.mkdirSync(CACHE_DIR, { recursive: true });
 }
 
 const MAX_DURATIONS = { 1: 180, 2: 420, 3: 1800 };
-const OBS_MUSIC_TICKER_SOURCE = 'Бегущая строка музыки';
+const MAX_DOWNLOAD_RETRIES = 2;
+const MAX_QUEUE_LENGTH = Number(process.env.MUSIC_MAX_QUEUE || 15);
+const MAX_TRACKS_PER_USER = Number(process.env.MUSIC_MAX_PER_USER || 2);
+const CACHE_MAX_FILES = Number(process.env.MUSIC_CACHE_MAX_FILES || 100);
+const CACHE_MAX_BYTES = Number(process.env.MUSIC_CACHE_MAX_MB || 500) * 1024 * 1024;
+// Запас поверх реальной длительности: если звук закончился, а overlay не
+// сообщил об этом (закрыт, заблокирован autoplay) — сервер сам идёт дальше.
+const WATCHDOG_GRACE_SEC = 20;
+const WATCHDOG_INTERVAL_MS = 5000;
+
+function wait(milliseconds) {
+    return new Promise(resolve => setTimeout(resolve, milliseconds));
+}
 
 class MusicQueue extends EventEmitter {
     constructor() {
@@ -141,27 +196,35 @@ class MusicQueue extends EventEmitter {
         this.currentCacheFile = null;
         this.startedAt = null;
         this.cache = new Map();
-        this.downloadProcess = null;
+        this.downloadPromises = new Map();
+        this.downloadProcesses = new Map();
+        this.cancelledDownloads = new Set();
         this.ffmpegProcess = null;
-        this.backgroundProcessId = null;
-        this.cancelledProcessIds = new Set();
-        this.isPlaying = false;
+        this.downloadProcess = null;
         this.isPaused = false;
         this.pausedAt = 0;
         this.playbackGeneration = 0;
+        this.lastAutoAdvanceAt = 0;
+        this.shutdownRequested = false;
         this.sleepModeEnabled = false;
         this.sleepPlaylistPath = null;
         this.sleepPlaylistEntries = [];
         this.sleepPlaylistIndex = 0;
         this.sleepPlaylistName = 'Не задан';
+
+        this.watchdogTimer = setInterval(() => this.watchdogTick(), WATCHDOG_INTERVAL_MS);
+        if (typeof this.watchdogTimer.unref === 'function') {
+            this.watchdogTimer.unref();
+        }
     }
 
-    async showMusicTicker() {
-        await setSourceVisibility(OBS_MUSIC_TICKER_SOURCE, true);
-    }
-
-    async hideMusicTicker() {
-        await setSourceVisibility(OBS_MUSIC_TICKER_SOURCE, false);
+    watchdogTick() {
+        const state = this.getState();
+        if (!state || state.isPaused || this.shutdownRequested) return;
+        if (state.duration > 0 && state.elapsed > state.duration + WATCHDOG_GRACE_SEC) {
+            console.warn(`[music-order] watchdog: overlay не сообщил об окончании, перехожу к следующему треку (title=${state.title})`);
+            this.skip();
+        }
     }
 
     sanitizePathInput(input) {
@@ -283,12 +346,14 @@ class MusicQueue extends EventEmitter {
             return [{ sourceType: 'local', value: resolved, filePath: resolved, cacheKey: resolved }];
         }
 
-        return [{ sourceType: 'remote', value: cleanYouTubeUrl(trimmed), cacheKey: trimmed }];
+        const url = cleanYouTubeUrl(trimmed);
+        return [{ sourceType: 'remote', value: url, cacheKey: url }];
     }
 
     buildLocalTrack(filePath, username, level, redemptionData, originalQuery) {
         const resolvedPath = this.resolveLocalPath(filePath);
         return {
+            id: crypto.randomUUID(),
             title: path.basename(resolvedPath),
             url: originalQuery || resolvedPath,
             duration: 0,
@@ -298,6 +363,12 @@ class MusicQueue extends EventEmitter {
             sourceType: 'local',
             filePath: resolvedPath
         };
+    }
+
+    countUserTracks(username) {
+        const inQueue = this.queue.filter(track => track.requestedBy === username).length;
+        const current = this.current && this.current.requestedBy === username ? 1 : 0;
+        return inQueue + current;
     }
 
     async add(query, username, level, redemptionData = null, options = {}) {
@@ -315,8 +386,12 @@ class MusicQueue extends EventEmitter {
         if (hasLocalCandidate && !allowLocal) {
             throw new Error('Локальные пути разрешены только из user interface');
         }
-        if (!candidates.length) {
-            throw new Error('Не удалось определить источник музыки');
+
+        if (this.queue.length + (this.current ? 1 : 0) >= MAX_QUEUE_LENGTH) {
+            throw new Error(`Очередь переполнена (максимум ${MAX_QUEUE_LENGTH}), попробуйте позже`);
+        }
+        if (this.countUserTracks(username) >= MAX_TRACKS_PER_USER) {
+            throw new Error(`У ${username} уже максимум треков в очереди (${MAX_TRACKS_PER_USER})`);
         }
 
         const queuedTracks = [];
@@ -326,25 +401,43 @@ class MusicQueue extends EventEmitter {
             let track;
 
             if (candidate.sourceType === 'local') {
+                const resolvedPath = this.resolveLocalPath(candidate.value);
+                const duplicateLocal = [this.current, ...this.queue].find(existing =>
+                    existing && existing.sourceType === 'local' && existing.filePath === resolvedPath
+                );
+                if (duplicateLocal) {
+                    throw new Error(duplicateLocal === this.current ? 'Этот трек уже играет' : 'Этот трек уже в очереди');
+                }
                 track = this.buildLocalTrack(candidate.value, username, level, redemptionData, trimmed);
-            } else if (this.cache.has(cacheKey)) {
-                track = { ...this.cache.get(cacheKey), requestedBy: username, redemptionData, level };
             } else {
-                const info = await this.getInfo(candidate.value);
-                if (info.duration > MAX_DURATIONS[level]) {
-                    throw new Error(`Трек слишком длинный (макс ${Math.floor(MAX_DURATIONS[level] / 60)} мин)`);
+                const url = candidate.value;
+                const duplicate = [this.current, ...this.queue].find(existing =>
+                    existing && existing.sourceType === 'remote' && cleanYouTubeUrl(existing.url) === url
+                );
+                if (duplicate) {
+                    throw new Error(duplicate === this.current ? 'Этот трек уже играет' : 'Этот трек уже в очереди');
                 }
 
-                track = {
-                    title: info.title,
-                    url: info.webpage_url || candidate.value,
-                    duration: info.duration || 0,
-                    requestedBy: username,
-                    level,
-                    redemptionData,
-                    sourceType: 'remote'
-                };
-                this.cache.set(cacheKey, track);
+                if (this.cache.has(cacheKey)) {
+                    track = { ...this.cache.get(cacheKey), id: crypto.randomUUID(), requestedBy: username, redemptionData, level };
+                } else {
+                    const info = await this.getInfo(url);
+                    if (info.duration > MAX_DURATIONS[level]) {
+                        throw new Error(`Трек слишком длинный (макс ${Math.floor(MAX_DURATIONS[level] / 60)} мин)`);
+                    }
+
+                    track = {
+                        id: crypto.randomUUID(),
+                        title: info.title,
+                        url: info.webpage_url || url,
+                        duration: info.duration || 0,
+                        requestedBy: username,
+                        level,
+                        redemptionData,
+                        sourceType: 'remote'
+                    };
+                    this.cache.set(cacheKey, track);
+                }
             }
 
             this.queue.push(track);
@@ -353,17 +446,35 @@ class MusicQueue extends EventEmitter {
 
         this.emit('stateChanged', this.getPublicState());
         console.log(`[music-order] queued orderId=${orderId} queueLength=${this.queue.length}`);
-        this.hideMusicTicker().catch(err => console.error('OBS: не удалось скрыть бегущую строку:', err.message));
 
-        try {
-            if (!this.current) {
-                this.playNext().catch(err => console.error('Ошибка запуска очереди:', err.message));
+        // Треки качаются сразу при заказе, а не когда дойдут до проигрывания:
+        // переход между треками становится практически мгновенным.
+        for (const track of queuedTracks) {
+            if (track.sourceType === 'remote') {
+                this.prefetchTrack(track);
             }
-        } catch (err) {
-            throw new Error(`Ошибка: ${err.message || err}`);
+        }
+
+        if (!this.current) {
+            this.playNext().catch(err => console.error('Ошибка запуска очереди:', err.message));
         }
 
         return queuedTracks[0];
+    }
+
+    prefetchTrack(track) {
+        this.ensureTrackReady(track).catch(err => {
+            if (this.current === track) return; // сбой текущего трека обрабатывает startCurrentTrack
+            const index = this.queue.indexOf(track);
+            if (index === -1) return; // трек уже убрали из очереди (например, очисткой)
+
+            this.queue.splice(index, 1);
+            console.error(`[music-order] prefetch failed title=${track.title} reason=${err.message}`);
+            if (track.redemptionData) {
+                this.emit('downloadError', { track, reason: err.message });
+            }
+            this.emit('stateChanged', this.getPublicState());
+        });
     }
 
     getInfo(query) {
@@ -372,11 +483,14 @@ class MusicQueue extends EventEmitter {
                 const isUrl = /^https?:\/\//i.test(query);
                 const searchQuery = isUrl ? query : `ytsearch1:${query}`;
 
+                // '--' закрывает список опций: запрос из чата не сможет
+                // притвориться флагом yt-dlp
                 const yt = await spawnYtDlp([
                     '--no-update',
                     '-j',
                     '--no-playlist',
                     '--js-runtime', 'node',
+                    '--',
                     searchQuery
                 ]);
 
@@ -405,29 +519,12 @@ class MusicQueue extends EventEmitter {
     }
 
     async playNext() {
-        const currentTrack = this.current;
-        console.log(`[music-order] playNext start current=${currentTrack ? currentTrack.title : 'none'} queueLength=${this.queue.length}`);
+        console.log(`[music-order] playNext start current=${this.current ? this.current.title : 'none'} queueLength=${this.queue.length}`);
         this.playbackGeneration += 1;
         const generation = this.playbackGeneration;
 
-        if (this.downloadProcess) {
-            try {
-                this.downloadProcess.kill('SIGKILL');
-            } catch (err) {
-                console.error('Error killing download:', err.message);
-            }
-            this.downloadProcess = null;
-        }
-
-        if (this.ffmpegProcess) {
-            try {
-                if (typeof this.ffmpegProcess.kill === 'function') {
-                    this.ffmpegProcess.kill();
-                }
-            } catch (err) {
-                console.error('Error killing ffmpeg:', err.message);
-            }
-            this.ffmpegProcess = null;
+        if (this.current && this.current.sourceType === 'remote') {
+            this.killDownloadForUrl(this.current.url);
         }
 
         if (this.queue.length > 0) {
@@ -440,12 +537,13 @@ class MusicQueue extends EventEmitter {
 
         if (!this.current) {
             console.log('[music-order] playNext finished: queue empty');
-            await this.showMusicTicker();
+            this.currentCacheFile = null;
+            this.isPaused = false;
+            this.pausedAt = 0;
             this.emit('stateChanged', this.getPublicState());
             return;
         }
 
-        await this.hideMusicTicker();
         await this.startCurrentTrack(generation);
     }
 
@@ -458,6 +556,7 @@ class MusicQueue extends EventEmitter {
         this.sleepPlaylistIndex = (this.sleepPlaylistIndex + 1) % this.sleepPlaylistEntries.length;
 
         return {
+            id: crypto.randomUUID(),
             title: entry.title,
             url: entry.source,
             duration: 0,
@@ -474,231 +573,272 @@ class MusicQueue extends EventEmitter {
         const currentTrack = this.current;
         if (!currentTrack) return;
 
-        const sourcePath = currentTrack.filePath || currentTrack.url;
         const logPrefix = currentTrack.isSleepTrack ? 'sleep-track' : 'track';
+        const sourcePath = currentTrack.filePath || currentTrack.url;
         console.log(`[music-order] starting ${logPrefix} orderId=${currentTrack.redemptionData?.redemptionId || 'unknown'} title=${currentTrack.title} source=${sourcePath}`);
 
-        if (currentTrack.sourceType === 'local' && currentTrack.filePath) {
-            const resolvedPath = this.resolveLocalPath(currentTrack.filePath);
-            if (!fs.existsSync(resolvedPath)) {
-                console.error(`[music-order] local file not found: ${resolvedPath}`);
-                this.playNext().catch(err => console.error('Ошибка перехода к следующему треку:', err.message));
+        try {
+            if (currentTrack.sourceType === 'local') {
+                const resolvedPath = this.resolveLocalPath(currentTrack.filePath);
+                if (!fs.existsSync(resolvedPath)) {
+                    throw new Error(`Локальный файл не найден: ${resolvedPath}`);
+                }
+                const duration = await probeDuration(resolvedPath);
+                if (duration <= 0) {
+                    throw new Error(`Локальный файл имеет нулевую длительность: ${resolvedPath}`);
+                }
+                if (generation !== this.playbackGeneration || this.current !== currentTrack) return;
+                currentTrack.duration = duration;
+                this.streamFromCache(resolvedPath);
                 return;
             }
 
-            try {
-                const metadata = await probeFile(resolvedPath);
-                const duration = metadata && metadata.format && metadata.format.duration ? Math.floor(metadata.format.duration) : 0;
-                if (duration <= 0) {
-                    console.warn(`[music-order] local file has zero duration: ${resolvedPath}`);
-                    this.playNext().catch(err => console.error('Ошибка перехода к следующему треку:', err.message));
-                    return;
-                }
-                currentTrack.duration = duration + 5;
-                this.streamFromCache(resolvedPath);
-            } catch (err) {
-                console.error('Error probing local track:', err.message);
-                this.playNext().catch(err => console.error('Ошибка перехода к следующему треку:', err.message));
+            const { file, duration } = await this.ensureTrackReady(currentTrack);
+            if (generation !== this.playbackGeneration || this.current !== currentTrack) {
+                console.log(`[music-order] stale generation ${generation}, ignoring start`);
+                return;
             }
-            return;
-        }
-
-        const cacheFile = path.join(CACHE_DIR, this.getCacheFileName(sourcePath));
-        if (fs.existsSync(cacheFile)) {
-            console.log(`[music-order] cache-hit file=${cacheFile}`);
-            const expectedUrl = currentTrack?.url;
-            try {
-                const metadata = await probeFile(cacheFile);
-                const duration = metadata && metadata.format && metadata.format.duration ? Math.floor(metadata.format.duration) : 0;
-
-                if (duration === 0) {
-                    console.warn(`[music-order] cache file has zero duration, redownloading: ${cacheFile}`);
-                    this.downloadAndCache(currentTrack.url, cacheFile, 0, generation);
-                    return;
-                }
-
-                if (generation !== this.playbackGeneration || !this.current || this.current.url !== expectedUrl) {
-                    return;
-                }
-
-                this.current.duration = duration + 5;
-                this.streamFromCache(cacheFile);
-            } catch (err) {
-                console.error('Error probing cached file:', err.message);
-                this.downloadAndCache(currentTrack.url, cacheFile, 0, generation);
+            if (!fs.existsSync(file)) {
+                throw new Error(`Файл трека не найден: ${file}`);
             }
-        } else {
-            this.downloadAndCache(currentTrack.url, cacheFile, 0, generation);
+
+            currentTrack.duration = duration;
+            this.streamFromCache(file);
+        } catch (err) {
+            // Если трек уже не текущий (его скипнули/очистили) — ошибка неактуальна
+            if (generation !== this.playbackGeneration || this.current !== currentTrack) {
+                console.log(`[music-order] stale start ${generation}, ignoring error: ${err.message}`);
+                return;
+            }
+            console.error(`[music-order] failed to start track title=${currentTrack.title}: ${err.message}`);
+            if (currentTrack.redemptionData) {
+                this.emit('downloadError', { track: currentTrack, reason: err.message });
+            }
+            this.skip();
         }
     }
 
-    async downloadAndCache(url, outputFile, retryCount = 0, generation = this.playbackGeneration) {
-        const currentTrack = this.current;
-        const currentUrl = currentTrack ? currentTrack.url : url;
+    getCacheFilePath(url) {
+        const name = path.basename(url || 'track') || 'track';
+        const safeName = name.replace(/[^a-zA-Z0-9._-]+/g, '_');
+        const hash = crypto.createHash('sha256').update(String(url)).digest('hex').slice(0, 12);
+        return path.join(CACHE_DIR, `${hash}_${safeName || 'track'}.mp3`);
+    }
 
-        console.log(`[music-order] downloading url=${url} output=${outputFile} retry=${retryCount} generation=${generation}`);
+    async probeCacheFile(cacheFile) {
+        if (!fs.existsSync(cacheFile)) return null;
+        try {
+            const duration = await probeDuration(cacheFile);
+            if (duration <= 0) {
+                console.warn(`[music-order] cache file has zero duration, will redownload: ${cacheFile}`);
+                return null;
+            }
+            return { file: cacheFile, duration };
+        } catch (err) {
+            console.error('Error probing cached file:', err.message);
+            return null;
+        }
+    }
 
+    // Гарантирует, что трек лежит в кэше готовым к проигрыванию.
+    // Параллельные вызовы для одного URL садятся на одну загрузку.
+    async ensureTrackReady(track) {
+        if (track.sourceType === 'local') {
+            return { file: track.filePath, duration: 0 };
+        }
+
+        const cacheFile = this.getCacheFilePath(track.url);
+        const cached = await this.probeCacheFile(cacheFile);
+        if (cached) {
+            track.duration = cached.duration;
+            return cached;
+        }
+
+        let promise = this.downloadPromises.get(cacheFile);
+        if (!promise) {
+            promise = this.runDownload(track.url, cacheFile, 0)
+                .finally(() => this.downloadPromises.delete(cacheFile));
+            this.downloadPromises.set(cacheFile, promise);
+        }
+
+        const result = await promise;
+        track.duration = result.duration;
+        this.cleanupCache().catch(err => console.error('Ошибка очистки кэша:', err.message));
+        return result;
+    }
+
+    async runDownload(url, outputFile, retryCount) {
         let proc;
         try {
+            // '--' перед url закрывает список опций yt-dlp
             proc = await spawnYtDlp([
                 '--no-update',
                 '-o', outputFile,
-                '-f', 'bestaudio[ext=m4a]/bestaudio',
+                '-f', 'bestaudio/best',
+                '--retries', '3',
+                '--fragment-retries', '3',
+                '--retry-sleep', 'http:exp=2:10',
+                '-x',
+                '--audio-format', 'mp3',
+                '--audio-quality', '0',
                 '--no-playlist',
                 '--no-cache-dir',
                 '--js-runtime', 'node',
+                '--',
                 url
             ]);
         } catch (err) {
-            console.error(`[music-order] yt-dlp spawn failed: ${err.message}`);
-            if (retryCount < 1) {
-                console.log('Retrying download due to spawn error...');
-                return this.downloadAndCache(url, outputFile, retryCount + 1, generation);
+            if (retryCount < MAX_DOWNLOAD_RETRIES) {
+                await wait(2000 * (retryCount + 1));
+                return this.runDownload(url, outputFile, retryCount + 1);
             }
-
-            if (this.current && this.current.redemptionData) {
-                this.emit('downloadError', {
-                    track: this.current,
-                    reason: err.message || 'Ошибка запуска yt-dlp'
-                });
-            }
-            this.playNext().catch(err => console.error('Ошибка перехода к следующему треку:', err.message));
-            return;
+            throw new Error(err.message || 'Ошибка запуска yt-dlp');
         }
 
-        this.downloadProcess = proc;
-        let stderr = '';
-        proc.stderr.on('data', chunk => stderr += chunk.toString());
+        const cacheKey = path.basename(outputFile);
+        this.downloadProcesses.set(cacheKey, proc);
+        this.downloadProcess = proc; // для gracefulShutdown
 
-        proc.on('close', async code => {
-            if (this.downloadProcess === proc) {
-                this.downloadProcess = null;
-            }
-            if (generation !== this.playbackGeneration || this.current?.url !== currentUrl) {
-                return;
-            }
+        return new Promise((resolve, reject) => {
+            let stderr = '';
+            proc.stderr.on('data', chunk => stderr += chunk.toString());
 
-            if (code === 0) {
-                console.log(`[music-order] download completed output=${outputFile} currentTitle=${this.current?.title || 'none'} generation=${generation}`);
-                try {
-                    const metadata = await probeFile(outputFile);
-                    const duration = metadata && metadata.format && metadata.format.duration ? Math.floor(metadata.format.duration) : 0;
-                    console.log(`[music-order] probe result output=${outputFile} duration=${duration}`);
-
-                    if (duration === 0) {
-                        console.error(`[music-order] downloaded file has zero duration output=${outputFile}`);
-                        await this.playNext().catch(err => console.error('Ошибка перехода к следующему треку:', err.message));
-                        return;
-                    }
-
-                    if (generation !== this.playbackGeneration) {
-                        console.log(`[music-order] stale generation ignored generation=${generation} currentGeneration=${this.playbackGeneration}`);
-                        return;
-                    }
-
-                    this.current.duration = duration + 5;
-                    console.log(`[music-order] track ready title=${this.current?.title} duration=${duration}`);
-                    this.streamFromCache(outputFile);
-                } catch (err) {
-                    console.error('Error probing downloaded file:', err.message);
-                    await this.playNext().catch(err => console.error('Ошибка перехода к следующему треку:', err.message));
+            proc.on('close', async code => {
+                if (this.downloadProcesses.get(cacheKey) === proc) {
+                    this.downloadProcesses.delete(cacheKey);
                 }
-            } else {
-                if (retryCount < 1) {
-                    console.log('Retrying download...');
-                    await this.downloadAndCache(url, outputFile, retryCount + 1, generation);
-                } else {
+                if (this.cancelledDownloads.has(cacheKey)) {
+                    this.cancelledDownloads.delete(cacheKey);
+                    return reject(new Error('Загрузка отменена'));
+                }
+                if (code !== 0) {
+                    if (retryCount < MAX_DOWNLOAD_RETRIES) {
+                        await wait(3000 * (retryCount + 1));
+                        try {
+                            resolve(await this.runDownload(url, outputFile, retryCount + 1));
+                        } catch (retryErr) {
+                            reject(retryErr);
+                        }
+                        return;
+                    }
                     const reason = stderr.trim() ? `yt-dlp failed: ${normalizeYtDlpError(stderr)}` : 'Не удалось загрузить трек';
-                    console.error(`[music-order] download failed reason=${reason}`);
-                    if (this.current && this.current.redemptionData) {
-                        this.emit('downloadError', {
-                            track: this.current,
-                            reason
-                        });
-                    }
-                    this.playNext().catch(err => console.error('Ошибка перехода к следующему треку:', err.message));
+                    return reject(new Error(reason));
                 }
-                return;
-            }
-        });
 
-        proc.on('error', async err => {
-            if (generation !== this.playbackGeneration || this.current?.url !== currentUrl) {
-                return;
-            }
-
-            if (retryCount < 1) {
-                console.log('Retrying download due to error...');
-                await this.downloadAndCache(url, outputFile, retryCount + 1, generation);
-            } else {
-                console.error(`[music-order] download failed after retry: ${err.message}`);
-                if (this.current && this.current.redemptionData) {
-                    this.emit('downloadError', {
-                        track: this.current,
-                        reason: err.message || 'Ошибка загрузки'
-                    });
+                const duration = await probeDuration(outputFile).catch(() => 0);
+                if (duration <= 0) {
+                    return reject(new Error('Загруженный файл имеет нулевую длительность'));
                 }
-                this.playNext().catch(err => console.error('Ошибка перехода к следующему треку:', err.message));
-            }
+                console.log(`[music-order] download completed file=${outputFile} duration=${duration}`);
+                resolve({ file: outputFile, duration });
+            });
+
+            proc.on('error', async err => {
+                if (this.downloadProcesses.get(cacheKey) === proc) {
+                    this.downloadProcesses.delete(cacheKey);
+                }
+                if (this.cancelledDownloads.has(cacheKey)) {
+                    this.cancelledDownloads.delete(cacheKey);
+                    return reject(new Error('Загрузка отменена'));
+                }
+                if (retryCount >= MAX_DOWNLOAD_RETRIES) {
+                    return reject(new Error(err.message || 'Ошибка загрузки'));
+                }
+                await wait(2000 * (retryCount + 1));
+                try {
+                    resolve(await this.runDownload(url, outputFile, retryCount + 1));
+                } catch (retryErr) {
+                    reject(retryErr);
+                }
+            });
         });
+    }
+
+    killDownloadForUrl(url) {
+        const cacheFile = this.getCacheFilePath(url);
+        const cacheKey = path.basename(cacheFile);
+        const proc = this.downloadProcesses.get(cacheKey);
+        if (!proc) return;
+        this.cancelledDownloads.add(cacheKey);
+        this.downloadProcesses.delete(cacheKey);
+        try {
+            proc.kill('SIGKILL');
+        } catch (err) {
+            console.error('Error killing download:', err.message);
+        }
+    }
+
+    // Держит кэш в рамках MUSIC_CACHE_MAX_FILES / MUSIC_CACHE_MAX_MB,
+    // удаляя самые старые файлы (кроме играющего и загружаемых).
+    async cleanupCache() {
+        const entries = [];
+        for (const name of fs.readdirSync(CACHE_DIR)) {
+            const filePath = path.join(CACHE_DIR, name);
+            try {
+                const stat = fs.statSync(filePath);
+                if (!stat.isFile()) continue;
+                entries.push({ filePath, size: stat.size, mtime: stat.mtimeMs });
+            } catch {
+                // файл мог исчезнуть между readdir и stat
+            }
+        }
+
+        const protectedFiles = new Set([this.currentCacheFile]);
+        for (const cacheFile of this.downloadPromises.keys()) {
+            protectedFiles.add(cacheFile);
+        }
+
+        entries.sort((a, b) => a.mtime - b.mtime); // самые старые первыми
+        let totalSize = entries.reduce((sum, entry) => sum + entry.size, 0);
+        let remaining = entries.length;
+        let removed = 0;
+
+        for (const entry of entries) {
+            if (remaining <= CACHE_MAX_FILES && totalSize <= CACHE_MAX_BYTES) break;
+            if (protectedFiles.has(entry.filePath)) continue;
+            try {
+                fs.unlinkSync(entry.filePath);
+                totalSize -= entry.size;
+                remaining -= 1;
+                removed += 1;
+            } catch (err) {
+                console.error(`Не удалось удалить кэш-файл ${entry.filePath}:`, err.message);
+            }
+        }
+
+        if (removed > 0) {
+            console.log(`[music-order] cache cleanup removed=${removed} filesLeft=${remaining} totalMB=${Math.round(totalSize / 1024 / 1024)}`);
+        }
     }
 
     streamFromCache(cacheFile) {
-        if (!fs.existsSync(cacheFile)) {
-            console.error('Cache file not found:', cacheFile);
-            this.playNext().catch(err => console.error('Ошибка перехода к следующему треку:', err.message));
-            throw new Error('Что-то сломалось, это не ваша вина...');
-        }
-
         this.currentCacheFile = cacheFile;
         this.startedAt = Date.now();
-        console.log(`[music-order] track start title=${this.current?.title} requestedBy=${this.current?.requestedBy} cacheFile=${cacheFile}`);
+        this.isPaused = false;
+        this.pausedAt = 0;
+        console.log(`[music-order] track start title=${this.current?.title} requestedBy=${this.current?.requestedBy} duration=${this.current?.duration} cacheFile=${cacheFile}`);
         this.emit('trackStart', this.current);
         this.emit('stateChanged', this.getPublicState());
-
-        if (!this.current.duration || this.current.duration <= 0) {
-            console.error(`[music-order] invalid duration title=${this.current?.title}`);
-            this.current = null;
-            this.currentCacheFile = null;
-            this.playNext().catch(err => console.error('Ошибка перехода к следующему треку:', err.message));
-            return;
-        }
-
-        if (this.cancelledProcessIds.size > 100) {
-            this.cancelledProcessIds.clear();
-        }
     }
 
-    getCacheFileName(url) {
-        const name = path.basename(url || 'track') || 'track';
-        const safeName = name.replace(/[^a-zA-Z0-9._-]+/g, '_');
-        const hash = crypto.createHash('md5').update(String(url)).digest('hex').slice(0, 10);
-        return `${hash}_${safeName || 'track'}`;
+    // Автопереход: клиент сообщил, что звук закончился. trackId и дебаунс
+    // защищают от двойных скипов (несколько overlay-клиентов, повторные ended).
+    advanceEnded(trackId) {
+        if (!this.current || !trackId || this.current.id !== trackId) {
+            return false;
+        }
+        const now = Date.now();
+        if (now - this.lastAutoAdvanceAt < 1500) {
+            return false;
+        }
+        this.lastAutoAdvanceAt = now;
+        this.skip();
+        return true;
     }
 
     skip() {
-        if (this.backgroundProcessId !== null) {
-            this.cancelledProcessIds.add(this.backgroundProcessId);
-        }
-
-        if (this.downloadProcess) {
-            try {
-                this.downloadProcess.kill('SIGKILL');
-            } catch (err) {
-                console.error('Error killing download:', err.message);
-            }
-            this.downloadProcess = null;
-        }
-
-        if (this.ffmpegProcess) {
-            try {
-                if (typeof this.ffmpegProcess.kill === 'function') {
-                    this.ffmpegProcess.kill();
-                }
-            } catch (err) {
-                console.error('Error killing ffmpeg:', err.message);
-            }
-            this.ffmpegProcess = null;
+        if (this.current && this.current.sourceType === 'remote') {
+            this.killDownloadForUrl(this.current.url);
         }
 
         this.emit('skip');
@@ -707,6 +847,45 @@ class MusicQueue extends EventEmitter {
         this.isPaused = false;
         this.pausedAt = 0;
         this.playNext().catch(err => console.error('Ошибка перехода к следующему треку:', err.message));
+    }
+
+    async clearQueue() {
+        const removedTracks = this.queue.splice(0, this.queue.length);
+        for (const track of removedTracks) {
+            if (track.sourceType === 'remote' && (!this.current || this.current.url !== track.url)) {
+                this.killDownloadForUrl(track.url);
+            }
+        }
+        if (!removedTracks.length) {
+            this.emit('stateChanged', this.getPublicState());
+            return { cleared: 0, refunded: 0, failed: 0 };
+        }
+
+        let refunded = 0;
+        let failed = 0;
+
+        for (const track of removedTracks) {
+            if (track.redemptionData) {
+                try {
+                    await cancelRedemption({
+                        broadcasterId: process.env.BROADCASTER_ID,
+                        rewardId: track.redemptionData.rewardId,
+                        redemptionId: track.redemptionData.redemptionId,
+                        userId: track.redemptionData.userId,
+                        accessToken: process.env.TWITCH_TOKEN_MY,
+                        clientId: process.env.CLIENT_ID_MY
+                    });
+                    refunded += 1;
+                } catch (err) {
+                    failed += 1;
+                    console.error(`Ошибка возврата баллов для ${track.requestedBy || 'пользователя'}:`, err.message || err);
+                }
+            }
+        }
+
+        this.emit('stateChanged', this.getPublicState());
+        console.log(`[music-order] queue cleared cleared=${removedTracks.length} refunded=${refunded} failed=${failed}`);
+        return { cleared: removedTracks.length, refunded, failed };
     }
 
     pause() {
@@ -728,13 +907,17 @@ class MusicQueue extends EventEmitter {
     }
 
     getState() {
-        if (!this.current) return null;
+        // Трек "существует" для клиентов только когда /audio уже может его
+        // отдавать. Иначе overlay подставит src до готовности файла, получит
+        // 404 и не будет повторять — тишина до ручного обновления источника.
+        if (!this.current || !this.currentCacheFile) return null;
 
         const elapsed = this.isPaused
             ? this.pausedAt
             : (this.startedAt ? Math.floor((Date.now() - this.startedAt) / 1000) : 0);
 
         return {
+            trackId: this.current.id,
             title: this.current.title,
             requestedBy: this.current.requestedBy,
             duration: this.current.duration,
@@ -866,7 +1049,8 @@ const musicQueue = new MusicQueue();
 musicQueue.__testHooks = {
     parseXspfPlaylist: (filePath) => musicQueue.parseXspfPlaylist(filePath),
     resolveTrackCandidates: (query) => musicQueue.resolveTrackCandidates(query),
-    buildYtDlpSpawnSpec: (extraArgs = []) => buildYtDlpSpawnSpec(extraArgs)
+    buildYtDlpSpawnSpec: (extraArgs = []) => buildYtDlpSpawnSpec(extraArgs),
+    normalizeYtDlpError: (stderr = '') => normalizeYtDlpError(stderr)
 };
 
 module.exports = musicQueue;

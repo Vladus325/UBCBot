@@ -1,33 +1,53 @@
+const fs = require('fs');
 const { refreshTokenPair } = require('./tokens');
 
-async function handleTokenRefresh(clientId) {
-    const refreshKey = clientId === process.env.CLIENT_ID_MY ? 'TWITCH_REFRESH_TOKEN_MY' : 'TWITCH_REFRESH_TOKEN';
-    const tokenKey = clientId === process.env.CLIENT_ID_MY ? 'TWITCH_TOKEN_MY' : 'TWITCH_TOKEN';
-    await refreshTokenPair(refreshKey, tokenKey);
-    return process.env[tokenKey];
+function tokenKeysForClient(clientId) {
+    if (clientId === process.env.CLIENT_ID_MY) {
+        return { refreshKey: 'TWITCH_REFRESH_TOKEN_MY', tokenKey: 'TWITCH_TOKEN_MY' };
+    }
+    return { refreshKey: 'TWITCH_REFRESH_TOKEN', tokenKey: 'TWITCH_TOKEN' };
+}
+
+// Единая обёртка над Helix API: при 401 обновляет токен и повторяет запрос.
+// Разрешены только официальные хосты Twitch — URL строится из литералов
+// и ID из .env оператора, но ограничение хоста отсекает любые вариации.
+const ALLOWED_API_HOSTS = new Set(['api.twitch.tv', 'id.twitch.tv']);
+
+function assertAllowedApiUrl(url) {
+    const target = new URL(url);
+    if (target.protocol !== 'https:' || !ALLOWED_API_HOSTS.has(target.hostname)) {
+        throw new Error(`Недопустимый адрес Twitch API: ${target.hostname}`);
+    }
 }
 
 async function makeApiCall(url, options, clientId) {
+    assertAllowedApiUrl(url);
     let response = await fetch(url, options);
 
     if (response.status === 401) {
-        try {
-            const newAccessToken = await handleTokenRefresh(clientId);
-            options.headers.Authorization = `Bearer ${newAccessToken}`;
-            response = await fetch(url, options);
-            if (!response.ok) {
-                const text = await response.text();
-                throw new Error(`API error after token refresh: ${text}`);
-            }
-        } catch (refreshErr) {
-            throw new Error(`Token refresh failed: ${refreshErr.message}`);
-        }
-    } else if (!response.ok) {
+        const { refreshKey, tokenKey } = tokenKeysForClient(clientId);
+        await refreshTokenPair(refreshKey, tokenKey);
+        options.headers = {
+            ...options.headers,
+            Authorization: `Bearer ${process.env[tokenKey]}`
+        };
+        response = await fetch(url, options);
+    }
+
+    if (!response.ok) {
         const text = await response.text();
-        throw new Error(`API error: ${text}`);
+        throw new Error(`Twitch API error: ${text}`);
     }
 
     return response;
+}
+
+function helixHeaders(accessToken, clientId, extra = {}) {
+    return {
+        'Client-ID': clientId,
+        'Authorization': `Bearer ${accessToken}`,
+        ...extra
+    };
 }
 
 async function timeoutUser({
@@ -38,65 +58,20 @@ async function timeoutUser({
     accessToken,
     clientId
 }) {
-    const response = await fetch(
-        `https://api.twitch.tv/helix/moderation/bans?broadcaster_id=${broadcasterId}&moderator_id=${moderatorId}`,
-        {
-            method: 'POST',
-            headers: {
-                'Client-ID': clientId,
-                'Authorization': `Bearer ${accessToken}`,
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                data: {
-                    user_id: userId,
-                    duration: duration,
-                    reason: 'Критическая неудача 😈'
-                }
-            })
+    const url = `https://api.twitch.tv/helix/moderation/bans?broadcaster_id=${broadcasterId}&moderator_id=${moderatorId}`;
+    const body = JSON.stringify({
+        data: {
+            user_id: userId,
+            duration: duration,
+            reason: 'Критическая неудача 😈'
         }
-    );
+    });
 
-    if (!response.ok) {
-        if (response.status === 401) {
-            // Попытка обновить токен и повторить
-            const refreshKey = clientId === process.env.CLIENT_ID_MY ? 'TWITCH_REFRESH_TOKEN_MY' : 'TWITCH_REFRESH_TOKEN';
-            const tokenKey = clientId === process.env.CLIENT_ID_MY ? 'TWITCH_TOKEN_MY' : 'TWITCH_TOKEN';
-            try {
-                await refreshTokenPair(refreshKey, tokenKey);
-                const newAccessToken = process.env[tokenKey];
-                // Повторяем запрос с новым токеном
-                const retryResponse = await fetch(
-                    `https://api.twitch.tv/helix/moderation/bans?broadcaster_id=${broadcasterId}&moderator_id=${moderatorId}`,
-                    {
-                        method: 'POST',
-                        headers: {
-                            'Client-ID': clientId,
-                            'Authorization': `Bearer ${newAccessToken}`,
-                            'Content-Type': 'application/json'
-                        },
-                        body: JSON.stringify({
-                            data: {
-                                user_id: userId,
-                                duration: duration,
-                                reason: 'Критическая неудача 😈'
-                            }
-                        })
-                    }
-                );
-                if (!retryResponse.ok) {
-                    const text = await retryResponse.text();
-                    throw new Error(`Twitch API error after token refresh: ${text}`);
-                }
-                return; // Успех
-            } catch (refreshErr) {
-                throw new Error(`Token refresh failed: ${refreshErr.message}`);
-            }
-        } else {
-            const text = await response.text();
-            throw new Error(`Twitch API error: ${text}`);
-        }
-    }
+    await makeApiCall(url, {
+        method: 'POST',
+        headers: helixHeaders(accessToken, clientId, { 'Content-Type': 'application/json' }),
+        body
+    }, clientId);
 }
 
 async function createReward({
@@ -110,13 +85,9 @@ async function createReward({
     clientId
 }) {
     const url = `https://api.twitch.tv/helix/channel_points/custom_rewards?broadcaster_id=${broadcasterId}`;
-    const options = {
+    const response = await makeApiCall(url, {
         method: 'POST',
-        headers: {
-            'Client-ID': clientId,
-            'Authorization': `Bearer ${accessToken}`,
-            'Content-Type': 'application/json'
-        },
+        headers: helixHeaders(accessToken, clientId, { 'Content-Type': 'application/json' }),
         body: JSON.stringify({
             title,
             cost,
@@ -124,9 +95,7 @@ async function createReward({
             is_user_input_required: isUserInputRequired,
             image: image || undefined
         })
-    };
-
-    const response = await makeApiCall(url, options, clientId);
+    }, clientId);
     const data = await response.json();
     return data.data[0];
 }
@@ -138,57 +107,12 @@ async function toggleReward({
     accessToken,
     clientId
 }) {
-    const response = await fetch(
-        `https://api.twitch.tv/helix/channel_points/custom_rewards?broadcaster_id=${broadcasterId}&id=${rewardId}`,
-        {
-            method: 'PATCH',
-            headers: {
-                'Client-ID': clientId,
-                'Authorization': `Bearer ${accessToken}`,
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                is_enabled: enabled
-            })
-        }
-    );
-
-    if (!response.ok) {
-        if (response.status === 401) {
-            // Попытка обновить токен и повторить
-            const refreshKey = clientId === process.env.CLIENT_ID_MY ? 'TWITCH_REFRESH_TOKEN_MY' : 'TWITCH_REFRESH_TOKEN';
-            const tokenKey = clientId === process.env.CLIENT_ID_MY ? 'TWITCH_TOKEN_MY' : 'TWITCH_TOKEN';
-            try {
-                await refreshTokenPair(refreshKey, tokenKey);
-                const newAccessToken = process.env[tokenKey];
-                // Повторяем запрос с новым токеном
-                const retryResponse = await fetch(
-                    `https://api.twitch.tv/helix/channel_points/custom_rewards?broadcaster_id=${broadcasterId}&id=${rewardId}`,
-                    {
-                        method: 'PATCH',
-                        headers: {
-                            'Client-ID': clientId,
-                            'Authorization': `Bearer ${newAccessToken}`,
-                            'Content-Type': 'application/json'
-                        },
-                        body: JSON.stringify({
-                            is_enabled: enabled
-                        })
-                    }
-                );
-                if (!retryResponse.ok) {
-                    const text = await retryResponse.text();
-                    throw new Error(`Twitch API error after token refresh: ${text}`);
-                }
-                return;
-            } catch (refreshErr) {
-                throw new Error(`Token refresh failed: ${refreshErr.message}`);
-            }
-        } else {
-            const text = await response.text();
-            throw new Error(`Twitch API error: ${text}`);
-        }
-    }
+    const url = `https://api.twitch.tv/helix/channel_points/custom_rewards?broadcaster_id=${broadcasterId}&id=${rewardId}`;
+    await makeApiCall(url, {
+        method: 'PATCH',
+        headers: helixHeaders(accessToken, clientId, { 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ is_enabled: enabled })
+    }, clientId);
 }
 
 async function deleteReward({
@@ -197,21 +121,11 @@ async function deleteReward({
     accessToken,
     clientId
 }) {
-    const res = await fetch(
-        `https://api.twitch.tv/helix/channel_points/custom_rewards?broadcaster_id=${broadcasterId}&id=${rewardId}`,
-        {
-            method: 'DELETE',
-            headers: {
-                'Client-ID': clientId,
-                'Authorization': `Bearer ${accessToken}`
-            }
-        }
-    );
-
-    if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`Delete error: ${text}`);
-    }
+    const url = `https://api.twitch.tv/helix/channel_points/custom_rewards?broadcaster_id=${broadcasterId}&id=${rewardId}`;
+    await makeApiCall(url, {
+        method: 'DELETE',
+        headers: helixHeaders(accessToken, clientId)
+    }, clientId);
 }
 
 async function backupRewards({
@@ -221,18 +135,12 @@ async function backupRewards({
 }) {
     console.log('🚀 BACKUP REWARDS START');
 
-    // 1. Получаем награды
-    const res = await fetch(
-        `https://api.twitch.tv/helix/channel_points/custom_rewards?broadcaster_id=${broadcasterId}`,
-        {
-            headers: {
-                'Client-ID': clientId,
-                'Authorization': `Bearer ${accessToken}`
-            }
-        }
-    );
+    const url = `https://api.twitch.tv/helix/channel_points/custom_rewards?broadcaster_id=${broadcasterId}`;
+    const response = await makeApiCall(url, {
+        headers: helixHeaders(accessToken, clientId)
+    }, clientId);
 
-    const json = await res.json();
+    const json = await response.json();
     const rewards = json.data;
 
     if (!Array.isArray(rewards)) {
@@ -241,7 +149,6 @@ async function backupRewards({
 
     console.log(`📥 Найдено наград: ${rewards.length}`);
 
-    // 2. Сохраняем бэкап
     fs.writeFileSync('./rewards_backup.json', JSON.stringify(rewards, null, 2));
     console.log('💾 Backup сохранён');
 }
@@ -278,7 +185,6 @@ async function restoreRewards({
                 newId: newReward.id,
                 title: r.title
             });
-
         } catch (e) {
             console.error(`❌ Ошибка: ${r.title}`, e);
         }
@@ -306,46 +212,12 @@ async function getRedemptions({
         url.searchParams.append('user_id', userId);
     }
 
-    const res = await fetch(url.toString(), {
+    const response = await makeApiCall(url.toString(), {
         method: 'GET',
-        headers: {
-            'Client-ID': clientId,
-            'Authorization': `Bearer ${accessToken}`
-        }
-    });
+        headers: helixHeaders(accessToken, clientId)
+    }, clientId);
 
-    if (!res.ok) {
-        if (res.status === 401) {
-            // Попытка обновить токен и повторить
-            const refreshKey = clientId === process.env.CLIENT_ID_MY ? 'TWITCH_REFRESH_TOKEN_MY' : 'TWITCH_REFRESH_TOKEN';
-            const tokenKey = clientId === process.env.CLIENT_ID_MY ? 'TWITCH_TOKEN_MY' : 'TWITCH_TOKEN';
-            try {
-                await refreshTokenPair(refreshKey, tokenKey);
-                const newAccessToken = process.env[tokenKey];
-                // Повторяем запрос с новым токеном
-                const retryRes = await fetch(url.toString(), {
-                    method: 'GET',
-                    headers: {
-                        'Client-ID': clientId,
-                        'Authorization': `Bearer ${newAccessToken}`
-                    }
-                });
-                if (!retryRes.ok) {
-                    const text = await retryRes.text();
-                    throw new Error(`Get redemptions error after token refresh: ${text}`);
-                }
-                const data = await retryRes.json();
-                return data.data || [];
-            } catch (refreshErr) {
-                throw new Error(`Token refresh failed: ${refreshErr.message}`);
-            }
-        } else {
-            const text = await res.text();
-            throw new Error(`Get redemptions error: ${text}`);
-        }
-    }
-
-    const data = await res.json();
+    const data = await response.json();
     return data.data || [];
 }
 
@@ -357,53 +229,12 @@ async function patchRedemptionStatus({
     accessToken,
     clientId
 }) {
-    const res = await fetch(
-        `https://api.twitch.tv/helix/channel_points/custom_rewards/redemptions?broadcaster_id=${broadcasterId}&reward_id=${rewardId}&id=${redemptionId}`,
-        {
-            method: 'PATCH',
-            headers: {
-                'Client-ID': clientId,
-                'Authorization': `Bearer ${accessToken}`,
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({ status })
-        }
-    );
-
-    if (!res.ok) {
-        if (res.status === 401) {
-            // Попытка обновить токен и повторить
-            const refreshKey = clientId === process.env.CLIENT_ID_MY ? 'TWITCH_REFRESH_TOKEN_MY' : 'TWITCH_REFRESH_TOKEN';
-            const tokenKey = clientId === process.env.CLIENT_ID_MY ? 'TWITCH_TOKEN_MY' : 'TWITCH_TOKEN';
-            try {
-                await refreshTokenPair(refreshKey, tokenKey);
-                const newAccessToken = process.env[tokenKey];
-                // Повторяем запрос с новым токеном
-                const retryRes = await fetch(
-                    `https://api.twitch.tv/helix/channel_points/custom_rewards/redemptions?broadcaster_id=${broadcasterId}&reward_id=${rewardId}&id=${redemptionId}`,
-                    {
-                        method: 'PATCH',
-                        headers: {
-                            'Client-ID': clientId,
-                            'Authorization': `Bearer ${newAccessToken}`,
-                            'Content-Type': 'application/json'
-                        },
-                        body: JSON.stringify({ status })
-                    }
-                );
-                if (!retryRes.ok) {
-                    const text = await retryRes.text();
-                    throw new Error(`Cancel redemption error after token refresh: ${text}`);
-                }
-                return;
-            } catch (refreshErr) {
-                throw new Error(`Token refresh failed: ${refreshErr.message}`);
-            }
-        } else {
-            const text = await res.text();
-            throw new Error(`Cancel redemption error: ${text}`);
-        }
-    }
+    const url = `https://api.twitch.tv/helix/channel_points/custom_rewards/redemptions?broadcaster_id=${broadcasterId}&reward_id=${rewardId}&id=${redemptionId}`;
+    await makeApiCall(url, {
+        method: 'PATCH',
+        headers: helixHeaders(accessToken, clientId, { 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ status })
+    }, clientId);
 }
 
 async function cancelRedemption({
@@ -442,7 +273,7 @@ async function cancelRedemption({
             lastError = err;
 
             // 404 может означать, что запрос уже не UNFULFILLED или id невалиден
-            if (err.message.includes('status:404') || err.message.includes('Not Found')) {
+            if (/"status":\s*404|Not Found/i.test(err.message || '')) {
                 // попытаемся найти другой UNFULFILLED редемпшн для этого пользователя
                 try {
                     const list = await getRedemptions({ broadcasterId, rewardId, userId, accessToken, clientId });
@@ -456,9 +287,8 @@ async function cancelRedemption({
                 break; // ничего не найдено, не retry
             }
 
-            if (err.type === 'system' || err.message.includes('ECONNRESET') || err.message.includes('ECONNREFUSED')) {
-                const delay = 500 * (i + 1);
-                await new Promise(r => setTimeout(r, delay));
+            if (/ECONNRESET|ECONNREFUSED|ETIMEDOUT|fetch failed/i.test(err.message || '')) {
+                await new Promise(r => setTimeout(r, 500 * (i + 1)));
                 continue;
             }
             throw err;
@@ -468,4 +298,14 @@ async function cancelRedemption({
     throw lastError;
 }
 
-module.exports = { timeoutUser, createReward, toggleReward, deleteReward, backupRewards, restoreRewards, cancelRedemption };
+module.exports = {
+    makeApiCall,
+    timeoutUser,
+    createReward,
+    toggleReward,
+    deleteReward,
+    backupRewards,
+    restoreRewards,
+    cancelRedemption,
+    patchRedemptionStatus
+};

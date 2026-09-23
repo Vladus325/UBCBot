@@ -13,5 +13,8 @@
   "!skip": "{skip}",
   "!np": "{np}",
   "!pause": "{pause}",
-  "!play": "{play}"
+  "!play": "{order}",
+  "!resume": "{play}",
+  "!queue": "{queue}",
+  "!очередь": "{queue}"
 }

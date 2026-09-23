@@ -1,11 +1,22 @@
-const fetch = require('node-fetch');
 const fs = require('fs');
+const path = require('path');
+
+const ENV_PATH = path.join(__dirname, '..', '..', '.env');
+
+// Разрешённые конечные точки обновления токенов (allowlist)
+const ALLOWED_TOKEN_HOSTS = new Set(['id.twitch.tv', 'twitchtokengenerator.com']);
+
+function assertAllowedTokenUrl(url) {
+    const target = new URL(url);
+    if (target.protocol !== 'https:' || !ALLOWED_TOKEN_HOSTS.has(target.hostname)) {
+        throw new Error(`Недопустимый адрес обновления токена: ${target.hostname}`);
+    }
+}
 
 async function saveEnvValue(key, value) {
-    const envPath = './.env';
-    if (!fs.existsSync(envPath)) return;
+    if (!fs.existsSync(ENV_PATH)) return;
 
-    const lines = fs.readFileSync(envPath, 'utf-8').split(/\r?\n/);
+    const lines = fs.readFileSync(ENV_PATH, 'utf-8').split(/\r?\n/);
     let updated = false;
 
     const newLines = lines.map(line => {
@@ -20,7 +31,7 @@ async function saveEnvValue(key, value) {
         newLines.push(`${key}=${value}`);
     }
 
-    fs.writeFileSync(envPath, newLines.join('\n'));
+    fs.writeFileSync(ENV_PATH, newLines.join('\n'));
 }
 
 async function refreshTokenPair(refreshTokenKey, tokenKey) {
@@ -30,7 +41,7 @@ async function refreshTokenPair(refreshTokenKey, tokenKey) {
         return;
     }
 
-    let url, headers, body;
+    let url, headers, method = 'POST', body;
 
     if (refreshTokenKey === 'TWITCH_REFRESH_TOKEN_MY') {
         // Официальный Twitch API для MY токена
@@ -43,15 +54,18 @@ async function refreshTokenPair(refreshTokenKey, tokenKey) {
             client_secret: process.env.TWITCH_SECRET_MY
         });
     } else {
-        // twitchtokengenerator.com для основного токена
-        url = `https://twitchtokengenerator.com/api/refresh/${refreshToken}`;
+        // twitchtokengenerator.com для основного токена (API отвечает на GET,
+        // на POST возвращает 405 Method Not Allowed)
+        url = `https://twitchtokengenerator.com/api/refresh/${encodeURIComponent(refreshToken)}`;
         headers = { 'Content-Type': 'application/json' };
+        method = 'GET';
         body = undefined;
     }
 
     try {
+        assertAllowedTokenUrl(url);
         const res = await fetch(url, {
-            method: 'POST',
+            method,
             headers,
             body
         });

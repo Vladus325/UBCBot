@@ -1,6 +1,8 @@
+const path = require('path');
 const Database = require('better-sqlite3');
 
-const db = new Database('./bot.db');
+// Всегда корневой bot.db, независимо от того, из какой папки запущен бот
+const db = new Database(path.join(__dirname, '..', '..', 'bot.db'));
 
 // Создаём таблицу
 db.prepare(`
